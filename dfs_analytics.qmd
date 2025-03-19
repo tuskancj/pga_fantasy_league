@@ -1,0 +1,51 @@
+---
+title: "PGA Golf DFS League Analytics"
+author: "C.J. Tuskan"
+date: last-modified
+subtitle: "Testing"
+format: html
+editor: visual
+df-print: kable
+embed-resources: true
+execute: 
+  echo: true
+toc: true
+---
+
+# Report Building
+
+## Get DFS Leaderboard
+
+## Get Race to 10 events (line plot to see trends)
+
+## Get top 5 selected golfers (POPULAR LEAGUE PICKS)
+
+## Get top 3 value golfers (CALC VALUE)
+
+## Get bottom 3 value golfers
+
+-   possibly a bubble plot for the above 2? Showing golfer selection volume and avg value?
+
+## made cut percentage?
+
+## Get wake-up call to users with most missed weeks
+
+## User specific top pics and value picks and made cut percentage
+
+# Predictions
+
+## Current year / Current Event
+
+```{r}
+#current year schedule
+df_sched <- fromJSON(paste('https://feeds.datagolf.com/get-schedule?tour=pga&file_format=json&key=', api_key, sep = ''))
+df_sched <- data.frame(df_sched) %>% clean_names()
+
+df_sched %>% mutate(schedule_start_date = as.Date(schedule_start_date)) 
+```
+
+```{r}
+#upcoming round
+df_field_updates <- fromJSON(paste('https://feeds.datagolf.com/field-updates?tour=pga&file_format=json&key=', api_key, sep = ''))
+df_field_updates
+```

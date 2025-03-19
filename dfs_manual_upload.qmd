@@ -1,0 +1,278 @@
+---
+title: "Manual DFS Golfer Board Upload"
+author: "C.J. Tuskan"
+date: last-modified
+subtitle: "Testing"
+format: html
+editor: visual
+df-print: kable
+embed-resources: true
+execute: 
+  echo: true
+toc: true
+---
+
+As commissioner of a PGA Golf Daily Fantasy Sports (DFS) League, it is advantageous and fun to share statistics about the league. There are typically very little analytics provided for PGA Golf DFS outside of weekly contest standings/earnings and overall league standings. PGA Golf DFS typically involves the selection of 6 golfers for each weekly contest. Each golfer has a salary based on their ability and each DFS league member has a salary cap. DFS league members must select 6 golfers within the salary cap who then receive points based on how well they do in the contest. Total points are aggregated and DFS league members compete against other members within the league. The DFS league member with the highest point total aggregated from their 6 chosen golfers wins that week's contest and a small payout.
+
+The purpose of this script is to provide an outlet to manually upload PGA Daily Fantasy Sports (DFS) selections into an AWS Postgre SQL database for aggregating League Analytics. Scraping of DFS websites is against the Terms and Conditions so a subscription was purchased from DataGolf.com which includes historical PGA course statistics and DFS statistics through partnerships. These statistics for every golfer and every PGA event are automatically uploaded to the AWS Postgre SQL database weekly via Lambda script. This information is necessary before DFS league members picks can be uploaded.
+
+Example analytics:
+
+-   how are DFS league members trending?
+-   which golfers are selected by the league most often/least often?
+-   which golfers have provided the best value to the league? to the DFS league member? (i.e. low salary cost, high point total)
+-   which golfers have provided the lowest value to the league? to the DFS league member? (i.e. high salary cost, low point total)
+-   which DFS league member has the best 'made-cut' percentage?
+-   which DFS league member has missed the most contests? (forgot to set their lineup)
+-   total weekly earnings to date for each DFS league member
+
+# Setup and Connection to Various Databases
+
+-   Statistics are pulled from DataGolf.com database and processed
+-   Data is then uploaded to AWS Postgre SQL database
+
+```{r}
+#setup
+suppressWarnings(suppressPackageStartupMessages({
+  library(tidyverse)
+  library(ggplot2)
+  library(janitor)
+  library(askpass)
+  library(jsonlite)
+  library(lubridate)
+  library(DBI)
+  library(RPostgres)
+}))
+
+#color set
+color_cjt <- c('#F1C40F', '#34495E', '#95A5A6')
+
+#Data Golf api key
+api_key <- askpass('API key:  ')
+
+#connect to AWS Postgres RDB
+host <- askpass('AWS host:  ')
+port <- 5432
+dbname <- 'postgres'
+user <- askpass('AWS Postgres username:  ')
+password <- askpass('AWS Postgres password:  ')
+
+# Establish a connection
+conn <- dbConnect(
+  drv = RPostgres::Postgres(),
+  dbname = dbname,
+  host = host,
+  port = port,
+  user = user,
+  password = password
+)
+
+# Check the connection
+if (!is.null(conn)) {
+  print("Connection successful!")
+} else {
+  print("Connection failed!")
+}
+
+#list tables of db
+# dbListTables(conn)
+```
+
+# Glimpse of Historical PGA Events from DataGolf.com
+
+This database is updated after each PGA contest.
+
+```{r}
+df_hist <- fromJSON(paste('https://feeds.datagolf.com/historical-raw-data/event-list?file_format=json&key=', api_key, sep = '')) %>% mutate(date = as.Date(date)) %>% clean_names()
+df_hist %>% filter(tour == 'pga', calendar_year == 2025) %>% arrange(date)
+```
+
+# Glimpse of DFS Events Uploaded to AWS
+
+The data from DataGolf.com should be pulled, processed, and uploaded to AWS on a weekly basis. Verify that the DFS events exist in AWS prior to manually uploading DFS league member picks.
+
+```{r}
+dbGetQuery(conn, "select * from event where calendar_year = 2025")
+```
+
+# Load DFS Boards
+
+Manually input the year, DataGolf event id, and filename information:
+
+```{r}
+year <- 2025
+event <- 10
+selected_file = '07_board.csv'
+
+#compile filepath - do not edit
+dir <- paste('../dfs_boards/', year, sep = '')
+selected_path <- paste(dir, selected_file, sep = '')
+```
+
+Golfer selections (total of 6) for each DFS league member are manually typed into a csv file (referencing the DFS website). The csv file is parsed and processed for uploading to the dfs_board table. There can be some complications:
+
+-   the DFS league member's selections can be NA if they forget to select golfers for the contest
+-   a DFS league member's a selected player can be missing from the DataGolf.com DFS database if the player withdrew prior to contest start
+-   a golfer's name in the DataGolf.com DFS database can be spelled differently from the DataGolf.com player database and/or DFS database
+    -   e.g. "van Rooyen, Erik" vs "Van Rooyen, Erik" or "Davis, Cameron" vs "Davis, Cam"
+
+These complications are logged and will not upload to the AWS database if there are unresolved issues. Sometimes, it's a spelling error in the csv. Sometimes, it's a deeper issue that resolves manual changes.
+
+```{r}
+#function to change vector to Postgre SQL friendly list
+get_sql_list <- function(vec){
+  paste('(', paste("'",vec,"'", collapse = ', ', sep = ''), ')', sep = '')
+}
+
+#get event from AWS
+id_event <- dbGetQuery(conn, paste("SELECT id_event FROM EVENT WHERE calendar_year = ", year, " AND event_id = ", event, sep = ""))
+
+#select the csv with the manually created event board
+df_board <- suppressMessages(read_csv(selected_path))
+
+#gather account id
+accounts <- dbGetQuery(conn, paste("SELECT username, id_account FROM ACCOUNT WHERE username in ", get_sql_list(df_board$username)))
+
+# #gather event id
+# id_event <- dbGetQuery(conn, paste("SELECT id_event FROM EVENT WHERE calendar_year = ", year, " AND event_id = ", event, sep = ""))
+
+#gather dfs totals
+df_board_longer <- pivot_longer(df_board, cols = starts_with('id_player_'), names_to = 'id_player', values_to = 'player') %>% mutate(player = ifelse(player == 0, NA, player))
+list_unique_players <- (df_board_longer %>% filter(!is.na(player)))$player %>% unique()
+dfs_totals <- dbGetQuery(conn, paste("SELECT id_dfs, player.player_name FROM DFS_TOTAL 
+                                     INNER JOIN player ON player.dg_id = dfs_total.dg_id 
+                                     WHERE dfs_total.id_event = '", id_event$id_event, "' 
+                                     AND player.player_name IN ", get_sql_list(list_unique_players)))
+
+#account can be NA if user doesn't set a board for the week
+#player can be NA if they drop out prior to round starting (they won't appear in the DG DFS report for that event)
+#player can be spelled different in DG DFS database e.g. van Rooyen vs Van Rooyen
+write_board_to_db <- function(){
+  df_board_coverted <- df_board %>% 
+  
+    #username -> id_account
+    left_join(accounts, by = 'username', relationship = 'one-to-one') %>% select(-username) %>% 
+    
+    #player name -> associated dfs totals id (for each selected player)
+    mutate(
+      id_dfs_1 = dfs_totals$id_dfs[match(id_player_1, dfs_totals$player_name)],
+      id_dfs_2 = dfs_totals$id_dfs[match(id_player_2, dfs_totals$player_name)],
+      id_dfs_3 = dfs_totals$id_dfs[match(id_player_3, dfs_totals$player_name)],
+      id_dfs_4 = dfs_totals$id_dfs[match(id_player_4, dfs_totals$player_name)],
+      id_dfs_5 = dfs_totals$id_dfs[match(id_player_5, dfs_totals$player_name)],
+      id_dfs_6 = dfs_totals$id_dfs[match(id_player_6, dfs_totals$player_name)]
+    ) %>% 
+    select(id_account, id_dfs_1, id_dfs_2, id_dfs_3, id_dfs_4, id_dfs_5, id_dfs_6)
+  
+  #write to db
+  dbWriteTable(conn, 'dfs_board', df_board_coverted , row.names = FALSE, append = TRUE)
+  
+  #check
+  dbGetQuery(conn, "SELECT * FROM dfs_board LIMIT 5")
+}
+
+if(length(dfs_totals$player_name) == length(list_unique_players)){
+  write_board_to_db()
+} else{
+  print('error, missing player(s):')
+  if(length(dfs_totals$player_name)>length(list_unique_players)){
+    missing_players <- setdiff(dfs_totals$player_name,list_unique_players)
+  }else{
+    missing_players <- setdiff(list_unique_players, dfs_totals$player_name)
+  }
+  
+  print(missing_players)
+  
+  #check to see if players exist
+  sql <- paste("SELECT * 
+  FROM player
+  WHERE player_name IN ", get_sql_list(missing_players), ";", sep='')
+  
+  check <- dbGetQuery(conn, sql)
+  
+  if(length(check$player_name) == length(missing_players)){
+    print('adding NAs for players within board since they exist in DB but no DFS scoring exists.  Likely dropout.')
+    write_board_to_db()
+  }
+  else{
+    print('check players.  At least one does not exist in database.')
+  }
+}
+```
+
+# Checks and Balances
+
+## Manual Player Checks if Necessary
+
+The following script can be used to cross check golfers within the AWS database vs the DataGolf.com database
+
+```{r}
+#check name differentials
+# sql <- "SELECT *
+# FROM player
+# WHERE player_name IN ('Zalatoris, Will', 'Woodland, Gary');"
+
+# sql <- "SELECT *
+# FROM player
+# WHERE player_name LIKE '%Rooyen%';"
+# 
+# dbGetQuery(conn, sql)
+
+
+# (fromJSON(paste('https://feeds.datagolf.com/historical-dfs-data/points?tour=pga',
+#                         '&site=fanduel',
+#                         '&event_id=', 540,
+#                         '&year=', year,
+#                         # '&market=',
+#                         '&file_format=json&key=', api_key,
+#                         sep = '')))$dfs_points %>% arrange(player_name)
+```
+
+## Find DFS Event Outcome
+
+After a successful upload to the AWS database, ensure contest standings and point totals match the DFS website.
+
+```{r}
+#manually set year and dg event id
+# year <- 2025
+# event <- 4
+
+#gather db event id
+# id_event <- dbGetQuery(conn, paste("SELECT id_event FROM EVENT WHERE calendar_year = ", year, " AND event_id = ", event, sep = ""))
+
+#create query
+sql <- paste("SELECT
+	ACCOUNT.USERNAME AS USERNAME,
+	EVENT.EVENT_NAME,
+	EVENT.CALENDAR_YEAR,
+	ROUND(SUM(DFS.TOTAL_PTS)::NUMERIC, 1) AS TOTAL_PTS
+FROM
+	DFS_BOARD
+	INNER JOIN ACCOUNT ON ACCOUNT.ID_ACCOUNT = DFS_BOARD.ID_ACCOUNT
+	INNER JOIN DFS_TOTAL AS DFS ON DFS.ID_DFS IN (
+		DFS_BOARD.ID_DFS_1,
+		DFS_BOARD.ID_DFS_2,
+		DFS_BOARD.ID_DFS_3,
+		DFS_BOARD.ID_DFS_4,
+		DFS_BOARD.ID_DFS_5,
+		DFS_BOARD.ID_DFS_6
+	)
+	INNER JOIN EVENT ON EVENT.ID_EVENT = DFS.ID_EVENT
+WHERE
+	DFS.ID_EVENT = '", id_event$id_event,
+"' GROUP BY
+	ACCOUNT.USERNAME,
+	EVENT.EVENT_NAME,
+	EVENT.CALENDAR_YEAR
+ORDER BY
+	TOTAL_PTS DESC", sep = '')
+
+df_event_outcome <- dbGetQuery(conn, sql)
+df_event_outcome
+```
+
+# Disconnect
+
+```{r}
+dbDisconnect(conn)
+```

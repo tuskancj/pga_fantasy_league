@@ -1,0 +1,375 @@
+---
+title: "DataGolf Queries"
+author: "C.J. Tuskan"
+date: last-modified
+subtitle: "Testing"
+format: html
+editor: visual
+df-print: kable
+embed-resources: true
+execute: 
+  echo: true
+---
+
+Some EDA of DataGolf.com database, data processing, and batch uploading of PGA golfer statistics and DFS statistics to AWS Postgre SQL database.
+
+# Setup and Connection to Various Databases
+
+```{r}
+#setup
+suppressWarnings(suppressPackageStartupMessages({
+  library(tidyverse)
+  library(ggplot2)
+  library(janitor)
+  library(askpass)
+  library(jsonlite)
+  library(lubridate)
+  library(DBI)
+  library(RPostgres)
+}))
+
+#color set
+color_cjt <- c('#F1C40F', '#34495E', '#95A5A6')
+
+#Data Golf api key
+api_key <- askpass('API key:  ')
+
+#connect to AWS Postgres RDB
+host <- askpass('AWS host:  ')
+port <- 5432
+dbname <- 'postgres'
+user <- askpass('AWS Postgres username:  ')
+password <- askpass('AWS Postgres password:  ')
+
+# Establish a connection
+conn <- dbConnect(
+  drv = RPostgres::Postgres(),
+  dbname = dbname,
+  host = host,
+  port = port,
+  user = user,
+  password = password
+)
+
+# Check the connection
+if (!is.null(conn)) {
+  print("Connection successful!")
+} else {
+  print("Connection failed!")
+}
+
+#list tables
+# dbListTables(conn)
+```
+
+# Creation of AWS Postgre SQL Database
+
+```{r}
+# TODO
+```
+
+
+# Batch Write to DB
+
+## 1. Players
+
+```{r}
+#get all players
+df_players <- fromJSON(paste('https://feeds.datagolf.com/get-player-list?file_format=json&key=', api_key, sep = ''))
+
+#look for duplicates
+df_players %>% group_by(dg_id) %>% summarize(count = length(dg_id)) %>% filter(count>1) %>%  arrange(desc(count))
+
+#filter out duplicates
+df_players <- df_players %>% filter(!player_name %in% c('Andi, Xu,', 'Cameron, Huss,'))
+
+#write to db
+dbWriteTable(conn, 'player', df_players , row.names = FALSE, append = TRUE)
+
+#check
+dbGetQuery(conn, "SELECT * FROM PLAYER LIMIT 5")
+```
+
+## 2. Event History
+
+```{r}
+event_stats <- df_hist %>% filter(tour == 'pga') %>% group_by(calendar_year, traditional_stats) %>% summarize(stat_count = length(traditional_stats), .groups = 'drop') 
+ggplot(event_stats, aes(calendar_year, stat_count, fill = traditional_stats))+
+  geom_col(position = 'dodge')+
+  theme_minimal()+
+  scale_x_continuous(labels = seq(2004, 2025, 1), breaks = seq(2004, 2025, 1))+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(title = 'PGA tour stat count')
+```
+
+```{r}
+event_sg <- df_hist %>% filter(tour == 'pga') %>% group_by(calendar_year, sg_categories) %>% summarize(sg_count = length(sg_categories), .groups = 'drop') 
+ggplot(event_sg, aes(calendar_year, sg_count, fill = sg_categories))+
+  geom_col(position = 'dodge')+
+  theme_minimal()+
+  scale_x_continuous(labels = seq(2004, 2025, 1), breaks = seq(2004, 2025, 1))+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(title = 'PGA tour sg count')
+```
+
+Upload from 2017 onward since traditional stats and strokes-gained stats have majority availability.
+
+```{r}
+df_hist <- fromJSON(paste('https://feeds.datagolf.com/historical-raw-data/event-list?file_format=json&key=', api_key, sep = '')) %>% mutate(date = as.Date(date)) %>% clean_names()
+df_events <- df_hist %>% arrange(date) %>% filter(tour == 'pga') %>% filter(calendar_year>=2017) %>% mutate(date = ymd(date)) %>% select(calendar_year, event_id, date, event_name)
+df_events <- df_events %>% mutate(dfs_payout = NA) #individual payouts to be added later based on league events
+
+#write to db
+dbWriteTable(conn, 'event', df_events, row.names = FALSE, append = TRUE)
+
+#check
+dbGetQuery(conn, "SELECT * FROM EVENT LIMIT 5")
+```
+
+## 3. Player Scoring
+
+There are typically 4 rounds per contest. Parse out round and course information.
+
+```{r}
+#get all 25 stat headers (they all exist for event 2 in 2025)
+df_scoring <- fromJSON(paste('https://feeds.datagolf.com/historical-raw-data/rounds?tour=pga&event_id=2&year=2025&file_format=json&key=', api_key, sep = ''))
+stat_names <- c('event_id', 'calendar_year', 'dg_id', 'round', 'fin_text', names((df_scoring$scores)[1,]$round_1)) #add dg_id and round (for 1-4)
+
+#set empty vector to store all rounds
+df_rounds <- data.frame(matrix(ncol = length(stat_names), nrow = 0)) %>% setNames(stat_names)
+
+# Start timer
+start_time <- proc.time()
+
+#get all individual pga rounds
+for(yr in unique(df_events$calendar_year)){
+  for(event_id in (df_events %>% filter(calendar_year == yr))$event_id){
+    #get the event historical data
+    df_scoring <- fromJSON(paste('https://feeds.datagolf.com/historical-raw-data/rounds?tour=pga&event_id=', event_id,'&year=', yr, '&file_format=json&key=', api_key, sep = ''))
+    
+    #loop through players
+    for(player_id in (df_scoring$scores)$dg_id){
+      player <- df_scoring$scores %>% filter(dg_id == player_id)
+      
+      #find differences if not all data is available
+      diffs <- setdiff(names(df_rounds), names(player$round_1))
+      basic <- c('event_id', 'calendar_year', 'dg_id', 'round', 'fin_text')
+      diffs <- setdiff(diffs, basic)
+      
+      #round 1
+      row <- player$round_1
+      row[diffs] <- NA # Add any missing columns
+      if(!all(is.na(row))){ #if a row has all NA, don't bother (mainly CUTS for later rounds)
+        df_rounds <- rbind(df_rounds, row %>% mutate(dg_id = player_id, fin_text = player$fin_text, round = 1, event_id = event_id, calendar_year = yr))
+      }
+
+      #round 2
+      row <- player$round_2
+      row[diffs] <- NA # Add any missing columns
+      if(!all(is.na(row))){
+        df_rounds <- rbind(df_rounds, row %>% mutate(dg_id = player_id, fin_text = player$fin_text, round = 2, event_id = event_id, calendar_year = yr))
+      }
+
+      #round 3
+      row <- player$round_3
+      row[diffs] <- NA # Add any missing columns
+      if(!all(is.na(row))){
+        df_rounds <- rbind(df_rounds, row %>% mutate(dg_id = player_id, fin_text = player$fin_text, round = 3, event_id = event_id, calendar_year = yr))
+      }
+
+      #round 4
+      row <- player$round_4
+      row[diffs] <- NA # Add any missing columns
+      if(!all(is.na(row))){
+        df_rounds <- rbind(df_rounds, row %>% mutate(dg_id = player_id, fin_text = player$fin_text, round = 4, event_id = event_id, calendar_year = yr))
+      }
+    }
+  }
+}
+
+# End timer
+end_time <- proc.time()
+
+# Time elapsed
+time_elapsed <- end_time - start_time
+print(time_elapsed/60)
+```
+
+### 3.1 Upload Course List
+
+```{r}
+df_courses <- df_rounds %>% group_by(course_num) %>% summarise(course_name = first(course_name), first(course_par)) %>% rename('course_par' = 'first(course_par)')
+
+#write to db
+dbWriteTable(conn, 'course', df_courses , row.names = FALSE, append = TRUE)
+
+#check
+dbGetQuery(conn, "SELECT * FROM COURSE LIMIT 5")
+```
+
+### 3.2 Upload Player Scoring
+
+```{r}
+df_rounds_clean <- df_rounds %>% select(-course_name, -course_par, -fin_text)
+
+#get id for course
+q_courses <- dbGetQuery(conn, "SELECT * FROM COURSE")
+
+#get id for event
+q_events <- dbGetQuery(conn, "SELECT * FROM EVENT")
+
+#join event id to df
+df_rounds_clean <- left_join(df_rounds_clean, 
+                              q_events %>% select(id_event, calendar_year, event_id), 
+                              by = c('event_id', 'calendar_year'), 
+                              relationship = 'many-to-one') %>% 
+                    select(-event_id, -calendar_year)
+
+#join course id to df
+df_rounds_clean <- left_join(df_rounds_clean,
+                              q_courses %>% select(id_course, course_num),
+                              by = c('course_num'),
+                              relationship = 'many-to-one') %>% 
+                      select(-course_num)
+
+#write to db
+dbWriteTable(conn, 'round', df_rounds_clean , row.names = FALSE, append = TRUE)
+
+#check
+dbGetQuery(conn, "SELECT * FROM ROUND LIMIT 5")
+```
+
+## 4. DFS Events
+
+```{r}
+#historical tourny data
+df_tournies <- fromJSON(paste('https://feeds.datagolf.com/historical-dfs-data/event-list?file_format=json&key=', api_key, sep = '')) %>% 
+  mutate(date = as.Date(date))
+df_tournies <- df_tournies %>% filter(tour == 'pga')
+
+fd <- df_tournies %>% group_by(calendar_year, fd_salaries) %>% summarize(count = length(fd_salaries))
+
+ggplot(fd, aes(calendar_year, count, fill = fd_salaries))+
+  geom_col(position = 'dodge')+
+  theme_minimal()+
+  scale_x_continuous(labels = seq(2004, 2025, 1), breaks = seq(2004, 2025, 1))+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(title = 'PGA tour fanduel salary data')
+```
+
+Not much salary information prior to 2022, but will pull all data from 2017 onward to match traditional stats.
+
+```{r}
+#get all 25 stat headers (they all exist for event 2 in 2025)
+df_fd_points <- fromJSON(paste('https://feeds.datagolf.com/historical-dfs-data/points?tour=pga', 
+                        '&site=fanduel',
+                        '&event_id=', '2',
+                        '&year=', '2025',
+                        # '&market=',
+                        '&file_format=json&key=', api_key, 
+                        sep = ''))
+stat_names <- c('calendar_year', 'event_id', names(df_fd_points))
+
+#set empty vector to store all rounds
+df_fd <- data.frame(matrix(ncol = length(stat_names), nrow = 0)) %>% setNames(stat_names)
+
+# Start timer
+start_time <- proc.time()
+
+#loop through years and events
+for(yr in unique(df_tournies$calendar_year)){
+  for(event_id in (df_tournies %>% filter(calendar_year == yr))$event_id){
+    #grab data
+    df <- fromJSON(paste('https://feeds.datagolf.com/historical-dfs-data/points?tour=pga', 
+                        '&site=fanduel',
+                        '&event_id=', event_id,
+                        '&year=', yr,
+                        # '&market=',
+                        '&file_format=json&key=', api_key, 
+                        sep = ''))
+    
+    df <- df$dfs_points %>% 
+      mutate(event_id = event_id) %>% 
+      mutate(calendar_year = yr)
+    
+    #append to df
+    df_fd <- rbind(df_fd, df)
+  }
+}
+
+# End timer
+end_time <- proc.time()
+
+# Time elapsed
+time_elapsed <- end_time - start_time
+print(time_elapsed/60)
+```
+
+There were some issues with mismatching DataGolf.com IDs:
+
+```{r}
+#cleanup
+df_fd_clean <- df_fd %>% select(-player_name)
+
+#join with event id
+df_fd_clean <- left_join(df_fd_clean, 
+                         q_events %>% select(-date, -event_name), 
+                         by = c('calendar_year', 'event_id'), 
+                         relationship = 'many-to-one') %>% 
+                select(-event_id, -calendar_year, -ownership)
+
+#clean up issues
+df_fd_clean <- df_fd_clean %>% mutate(dg_id = case_when(dg_id==10001604 ~ 1606, #Jurgensen, Steve
+                                                        dg_id==10006693 ~ 4857, #Tanigawa, Ken
+                                                        .default = dg_id))
+```
+
+Additionally, there were players in the DFS database that were missing from the DataGolf.com players database. The country and amateur status for these golfers were found via Microsoft CoPilot AI and processed into a csv:
+
+```{r}
+#missing IDs were found and written to file.  Country & Amateur status were then found by Microsoft CoPilot
+missing_ids <- setdiff(df_fd_clean$dg_id, df_players$dg_id)
+new_player_ids <- df_fd %>% filter(dg_id %in% missing_ids) %>% select(dg_id, player_name) %>% group_by(dg_id, player_name) %>% summarize()
+write_csv(data.frame(names = new_player_ids), file = 'names.csv')
+```
+
+### 4.1 Upload Missing Players to AWS
+
+```{r}
+# these players were left out and threw errors when trying to upload fantasy results
+new_players <- read_csv('../data/names.csv') %>%
+  mutate(country = case_when(c == 'USA' ~ 'United States',
+                             .default = c)) %>%
+  mutate(country_code = case_when(c == 'Canada' ~ 'CAN',
+                                  c == 'Chile' ~ 'CHI',
+                                  c == 'England' ~ 'ENG',
+                                  c == 'India' ~ 'IND',
+                                  c == 'South Korea' ~ 'KOR',
+                                  .default = c)) %>%
+  mutate(amateur = ifelse(a=='Professional', 0,1))
+
+new_players <- new_players %>% select(-c, -a)
+
+for(id in new_players$dg_id){
+  q <- dbGetQuery(conn, paste("SELECT DG_ID FROM PLAYER WHERE DG_ID = ", as.character(id), sep = ''))
+  if(length(q$dg_id)==0){
+    dbWriteTable(conn, 'player', new_players %>% filter(dg_id == id) , row.names = FALSE, append = TRUE)
+  }
+}
+```
+
+### 4.2 Finally, write DFS Results to AWS
+
+```{r}
+#write to db
+dbWriteTable(conn, 'dfs_total', df_fd_clean , row.names = FALSE, append = TRUE)
+
+#check
+dbGetQuery(conn, "SELECT * FROM DFS_TOTAL LIMIT 5")
+```
+
+# Disconnect
+
+```{r}
+dbDisconnect(conn)
+```
