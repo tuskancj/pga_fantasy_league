@@ -185,6 +185,7 @@ dbGetQuery(conn, "SELECT * FROM PLAYER LIMIT 5")
 ## 2. Event History
 
 ```{r}
+df_hist <- fromJSON(paste('https://feeds.datagolf.com/historical-raw-data/event-list?file_format=json&key=', api_key, sep = '')) %>% mutate(date = as.Date(date)) %>% clean_names()
 event_stats <- df_hist %>% filter(tour == 'pga') %>% group_by(calendar_year, traditional_stats) %>% summarize(stat_count = length(traditional_stats), .groups = 'drop') 
 ggplot(event_stats, aes(calendar_year, stat_count, fill = traditional_stats))+
   geom_col(position = 'dodge')+
@@ -207,7 +208,6 @@ ggplot(event_sg, aes(calendar_year, sg_count, fill = sg_categories))+
 Upload from 2017 onward since traditional stats and strokes-gained stats have majority availability.
 
 ```{r}
-df_hist <- fromJSON(paste('https://feeds.datagolf.com/historical-raw-data/event-list?file_format=json&key=', api_key, sep = '')) %>% mutate(date = as.Date(date)) %>% clean_names()
 df_events <- df_hist %>% arrange(date) %>% filter(tour == 'pga') %>% filter(calendar_year>=2017) %>% mutate(date = ymd(date)) %>% select(calendar_year, event_id, date, event_name)
 df_events <- df_events %>% mutate(dfs_payout = NA) #individual payouts to be added later based on league events
 
@@ -352,7 +352,7 @@ ggplot(fd, aes(calendar_year, count, fill = fd_salaries))+
 Not much salary information prior to 2022, but will pull all data from 2017 onward to match traditional stats.
 
 ```{r}
-#get all 25 stat headers (they all exist for event 2 in 2025)
+#get all stat headers (they all exist for event 2 in 2025)
 df_fd_points <- fromJSON(paste('https://feeds.datagolf.com/historical-dfs-data/points?tour=pga', 
                         '&site=fanduel',
                         '&event_id=', '2',
