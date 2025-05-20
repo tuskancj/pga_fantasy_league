@@ -12,20 +12,6 @@ execute:
 toc: true
 ---
 
-As commissioner of a PGA Golf Daily Fantasy Sports (DFS) League, it is advantageous and fun to share statistics about the league. There are typically very little analytics provided for PGA Golf DFS outside of weekly contest standings/earnings and overall league standings. PGA Golf DFS typically involves the selection of 6 golfers for each weekly contest. Each golfer has a salary based on their ability and each DFS league member has a salary cap. DFS league members must select 6 golfers within the salary cap who then receive points based on how well they do in the contest. Total points are aggregated and DFS league members compete against other members within the league. The DFS league member with the highest point total aggregated from their 6 chosen golfers wins that week's contest and a small payout.
-
-The purpose of this script is to provide an outlet to manually upload PGA Daily Fantasy Sports (DFS) selections into an AWS Postgre SQL database for aggregating League Analytics. Scraping of DFS websites is against the Terms and Conditions so a subscription was purchased from DataGolf.com which includes historical PGA course statistics and DFS statistics through partnerships. These statistics for every golfer and every PGA event are automatically uploaded to the AWS Postgre SQL database weekly via Lambda script. This information is necessary before DFS league members picks can be uploaded.
-
-Example analytics:
-
--   how are DFS league members trending?
--   which golfers are selected by the league most often/least often?
--   which golfers have provided the best value to the league? to the DFS league member? (i.e. low salary cost, high point total)
--   which golfers have provided the lowest value to the league? to the DFS league member? (i.e. high salary cost, low point total)
--   which DFS league member has the best 'made-cut' percentage?
--   which DFS league member has missed the most contests? (forgot to set their lineup)
--   total weekly earnings to date for each DFS league member
-
 # Setup and Connection to Various Databases
 
 -   Statistics are pulled from DataGolf.com database and processed

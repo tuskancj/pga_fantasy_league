@@ -1,0 +1,629 @@
+---
+title: "BuildMeUpButterCut DFS League Update"
+date: last-modified
+subtitle: "Week 13"
+format:
+ html:
+   grid:
+      sidebar-width: 1px
+      body-width: 1200px
+      margin-width: 300px
+      gutter-width: 1.5rem
+editor: visual
+df-print: kable
+embed-resources: true
+execute: 
+  echo: false
+toc: true
+---
+
+# It's Masters Week!
+
+![](masters.jpg)
+
+Welcome to the first BuildMeUpButterCut PGA fantasy league update, where we’re teeing off in style for Masters week—Augusta dreams and green jacket schemes! Our league has been on fire with close to 9500 birdies to date, but we’ve also shanked \~6000 bogeys. With an average FPPG of 66.2 this season, some of us are channeling Justin Thomas’s clutch vibes, while others are pulling a 'go-for-broke' à la Phil Mickelson.
+
+Here’s hoping we all survive Amen Corner with our dignity intact!
+
+```{r}
+#setup
+suppressWarnings(suppressPackageStartupMessages({
+  library(tidyverse)
+  library(ggplot2)
+  library(janitor)
+  library(jsonlite)
+  library(lubridate)
+  library(DBI)
+  library(RPostgres)
+  library(scales)
+  library(RColorBrewer)
+  library(ggimage)
+  library(DT)
+}))
+
+#source db info
+source('../db_creds.R')
+
+#color set
+color_cjt <- c('#F1C40F', '#34495E', '#95A5A6')
+
+# Establish a connection
+conn <- dbConnect(
+  drv = RPostgres::Postgres(),
+  dbname = dbname,
+  host = host,
+  port = port,
+  user = user,
+  password = password
+)
+
+# # Check the connection
+# if (!is.null(conn)) {
+#   print("Connection successful!")
+# } else {
+#   print("Connection failed!")
+# }
+
+#list tables of db
+# dbListTables(conn)
+```
+
+```{r}
+# get the top ten scores for each user
+df_top_ten <- dbGetQuery(conn, "
+           WITH
+          	CTE1 AS ( --gets list of all golfer scores
+          		SELECT
+          			ACCOUNT.USERNAME AS USERNAME,
+          			ACCOUNT.FIRST_NAME,
+          			ACCOUNT.LAST_NAME,
+          			EVENT.CALENDAR_YEAR,
+          			EVENT.EVENT_NAME,
+          			EVENT.DATE,
+          			DFS.TOTAL_PTS
+          		FROM
+          			DFS_BOARD
+          			INNER JOIN ACCOUNT ON ACCOUNT.ID_ACCOUNT = DFS_BOARD.ID_ACCOUNT
+          			INNER JOIN DFS_TOTAL AS DFS ON DFS.ID_DFS IN (
+          				DFS_BOARD.ID_DFS_1,
+          				DFS_BOARD.ID_DFS_2,
+          				DFS_BOARD.ID_DFS_3,
+          				DFS_BOARD.ID_DFS_4,
+          				DFS_BOARD.ID_DFS_5,
+          				DFS_BOARD.ID_DFS_6
+          			)
+          			INNER JOIN EVENT ON EVENT.ID_EVENT = DFS.ID_EVENT
+          		WHERE
+          			EVENT.CALENDAR_YEAR = 2025
+          	),
+          	CTE2 AS ( --sums golfer scores for each event
+          		SELECT
+          			USERNAME,
+          			FIRST_NAME,
+          			LAST_NAME,
+          			CALENDAR_YEAR,
+          			EVENT_NAME,
+          			DATE,
+          			ROUND(SUM(TOTAL_PTS)::NUMERIC, 1) AS SUM_TOTAL_PTS
+          		FROM
+          			CTE1
+          		GROUP BY
+          			USERNAME,
+          			FIRST_NAME,
+          			LAST_NAME,
+          			CALENDAR_YEAR,
+          			EVENT_NAME,
+          			DATE
+          		ORDER BY
+          			USERNAME,
+          			SUM_TOTAL_PTS DESC
+          	),
+          	CTE3 AS ( --adds row number based on scoring sum
+          		SELECT
+          			*,
+          			ROW_NUMBER() OVER (
+          				PARTITION BY
+          					USERNAME
+          				ORDER BY
+          					SUM_TOTAL_PTS DESC
+          			) AS TOP_SCORE_RANK
+          		FROM
+          			CTE2
+          	)
+          --finally selects the top 10 scores
+          SELECT
+          	*
+          FROM
+          	CTE3
+          WHERE
+          	TOP_SCORE_RANK <= 10
+          ORDER BY
+          	USERNAME,
+          	DATE
+           ")
+
+df_top_ten <- df_top_ten %>% mutate(name = paste(first_name, last_name)) %>% select(name, username, calendar_year, event_name, date, sum_total_pts, top_score_rank)
+```
+
+```{r}
+#function to create clean tables
+create_table <- function(df){
+  rows <- dim(df)[1]
+  table <- df %>% 
+        DT::datatable(options = list(paging = FALSE, #disable paging
+                                     searching = F, #disable search
+                                     columnDefs = list(list(className = 'dt-center', targets = "_all")),  # Center all columns
+                                     dom = 't' #only show the table, no 'showing 1 to 10 of 11 entries' below
+                                    ),
+                      rownames = F
+                      ) %>% 
+        formatStyle(
+          columns = 1:rows,
+          fontFamily = "Bootstrap 5",  # Specify your desired font
+          fontSize = '15px'
+        )
+  return(table)
+}
+```
+
+## 1 - Contest Winners
+
+```{r}
+df_dfs_contests <- df_top_ten %>% group_by(event_name, date) %>% slice_max(sum_total_pts, n=1, with_ties = F) %>% select(-calendar_year, -top_score_rank) %>% arrange(date) %>% ungroup()
+df_dfs_contests$contest <- seq(1, length(df_dfs_contests$event_name), 1)
+
+
+
+#add in earnings
+dfs_earnings <- dbGetQuery(conn, "select event_name, dfs_payout from event where calendar_year = 2025;")
+df_dfs_contests <- df_dfs_contests %>% left_join(dfs_earnings, by = 'event_name', relationship = 'one-to-one')
+
+t <- df_dfs_contests %>% 
+  select(contest, event_name, date, sum_total_pts, name, username, dfs_payout) %>% 
+  rename('Contest' = 'contest', 
+         'Event' = 'event_name', 
+         'Date' = 'date', 
+         'Total Points' = 'sum_total_pts', 
+         'Username' = 'username', 
+         'Manager' = 'name',
+         'Payout' = 'dfs_payout') %>% 
+  mutate(Payout = paste('$',Payout,sep = ''))
+
+create_table(t)
+```
+
+## 2 - Earnings to Date
+
+```{r, fig.width=10, fig.height=10}
+t <- df_dfs_contests %>% 
+  group_by(name, username) %>% 
+  summarize(total_earnings = sum(dfs_payout), .groups = 'drop') %>% 
+  arrange(desc(total_earnings)) %>% 
+  mutate(contests_won = total_earnings/15.51) %>%
+  # mutate(total_earnings = paste('$',total_earnings,sep = '')) %>% 
+  select(name, username, contests_won, total_earnings) %>% 
+  rename('Manager' = 'name', 'Username' = 'username', 'Total Earnings' = 'total_earnings', 'Contests Won' = 'contests_won') 
+
+#dollar bill plot
+t$image <- 'dollar_rotated.png'
+t <- t[rep(1:nrow(t), times = t$`Contests Won`), ]
+t$stack <- ave(t$`Contests Won`, t$Username, FUN = seq_along)
+
+font_size <- 30
+ggplot(t, aes(y = stack-0.5, x = reorder(Manager, -`Contests Won`))) +
+  geom_image(aes(image = image), size = 0.09) + # Adjust size of the image
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.25)
+  )+
+  theme(
+    axis.text = element_text(size = font_size),
+    axis.title = element_text(size = font_size, face = "bold"),
+    legend.text = element_text(size = font_size),
+    axis.text.y.left = element_text(margin = margin(l=10)),
+    axis.text.y.right = element_text(margin = margin(r=10))
+  )+
+  scale_y_continuous(breaks = seq(0, max(t$`Contests Won`), 1), 
+                     limits = c(0, 4),
+                     sec.axis = sec_axis(~ .*15.51 , 
+                                         name = "Amount Won", 
+                                         breaks = seq(0,15.51*4, 15.51), 
+                                         labels = dollar_format()))+ # Secondary
+  labs(
+    y = "# Events Won",
+    x = ""
+  )
+```
+
+## 3 - Cumulative Rankings
+
+```{r}
+df_standings <- df_top_ten %>% group_by(name, username) %>% summarise(top_ten_agg = sum(sum_total_pts), .groups = 'drop') %>% arrange(desc(top_ten_agg)) 
+df_standings$place <- seq(1,11,1)
+
+t <- df_standings %>% 
+  select(place, name, username, top_ten_agg) %>% 
+  rename('Username' = 'username', 'Top Ten Score Total' = 'top_ten_agg', 'Rank' = 'place', 'Manager' = 'name') %>% 
+  mutate(Manager = ifelse(Manager == 'Charles Tuskan', 'C.J. Tuskan',Manager))
+
+create_table(t)
+```
+
+### 3.1 - Ranking Trends
+
+The pot this year will be given to the Manager with top 10 highest scores. League standings are somewhat volatile as we have raced to fill scoring slots. Nearly everyone has 10 scores under their belt at this point and the cumulative 10-score rankings are shown below by event.
+
+```{r}
+df_all_scores <- dbGetQuery(conn, "
+                            WITH
+	CTE1 AS ( --gets list of all golfer scores
+		SELECT
+			ACCOUNT.USERNAME AS USERNAME,
+			ACCOUNT.FIRST_NAME,
+			ACCOUNT.LAST_NAME,
+			EVENT.CALENDAR_YEAR,
+			EVENT.EVENT_NAME,
+			EVENT.DATE,
+			DFS.TOTAL_PTS
+		FROM
+			DFS_BOARD
+			INNER JOIN ACCOUNT ON ACCOUNT.ID_ACCOUNT = DFS_BOARD.ID_ACCOUNT
+			INNER JOIN DFS_TOTAL AS DFS ON DFS.ID_DFS IN (
+				DFS_BOARD.ID_DFS_1,
+				DFS_BOARD.ID_DFS_2,
+				DFS_BOARD.ID_DFS_3,
+				DFS_BOARD.ID_DFS_4,
+				DFS_BOARD.ID_DFS_5,
+				DFS_BOARD.ID_DFS_6
+			)
+			INNER JOIN EVENT ON EVENT.ID_EVENT = DFS.ID_EVENT
+		WHERE
+			EVENT.CALENDAR_YEAR = 2025
+	)
+		SELECT
+			USERNAME,
+			FIRST_NAME,
+			LAST_NAME,
+			CALENDAR_YEAR,
+			EVENT_NAME,
+			DATE,
+			ROUND(SUM(TOTAL_PTS)::NUMERIC, 1) AS SUM_TOTAL_PTS
+		FROM
+			CTE1
+		GROUP BY
+			USERNAME,
+			FIRST_NAME,
+			LAST_NAME,
+			CALENDAR_YEAR,
+			EVENT_NAME,
+			DATE
+		ORDER BY
+			USERNAME,
+			SUM_TOTAL_PTS DESC
+	")
+```
+
+```{r}
+
+#clean up and add missing weeks
+df_all_scores_clean <- df_all_scores %>%
+  mutate(Manager = paste(first_name, last_name)) %>% select(Manager, username, calendar_year, event_name, date, sum_total_pts) %>%
+  left_join(df_dfs_contests %>% select(event_name, contest), by = 'event_name', relationship = 'many-to-one') %>%
+  select(-calendar_year) %>%
+  complete(nesting(username, Manager), nesting(contest, event_name, date), fill = list(sum_total_pts = 0.0))
+    
+#placeholder for weekly cumulative rankings
+df_weekly_rankings <- data.frame()
+
+# loop through all event scoring, capture top 10 scores each time, calculate cumulative score after that contest, add to the above df
+for(event in 1:max(df_all_scores_clean$contest)){
+  
+  #get the top ten scores based on the week number
+  event_rankings <- df_all_scores_clean %>% 
+    
+    #filter by contest
+    filter(contest<=event) %>% 
+    
+    #arrange by username and sort event scores
+    group_by(username) %>%
+    arrange(desc(sum_total_pts), .by_group = T) %>%
+    
+    #grab the top ten scores
+    slice_max(sum_total_pts, n=10, with_ties = F) %>% 
+    
+    #arrange by contest
+    group_by(username) %>% 
+    arrange(contest, .by_group = T) %>% 
+    ungroup() %>% 
+  
+    #ensure every user has cum value for current event
+    complete(nesting(username, Manager), nesting(contest, event_name, date), fill = list(sum_total_pts = 0.0)) %>% 
+  
+   #generate cumulative scoring
+    group_by(username) %>% 
+    mutate(cum_pts = cumsum(sum_total_pts)) %>% 
+    ungroup() %>% 
+    
+    #grab current week
+    filter(contest==event) %>% 
+    arrange(desc(cum_pts)) %>% 
+    
+    #add weekly position for cumulative scoring
+    group_by(contest) %>%
+    mutate(weekly_ranking = row_number())
+  
+  #add to df
+  df_weekly_rankings <- rbind(df_weekly_rankings, event_rankings)
+}
+```
+
+```{r, fig.width=20, fig.height=35}
+font_size <- 60
+
+ggplot(df_weekly_rankings %>% mutate(Manager = ifelse(Manager == 'Charles Tuskan', 'C.J. Tuskan',Manager)), aes(reorder(event_name, contest), weekly_ranking, group = Manager, col = Manager))+
+  geom_point(size = 20)+
+  geom_line(linewidth = 18)+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.25),
+    panel.grid.minor = element_blank(), # Remove minor grid lines
+    legend.position = 'top',
+    # legend.margin = margin(t = 10, b = 0),
+    legend.box.spacing = unit(3, "cm"),
+    axis.text = element_text(size = font_size), 
+    axis.title = element_text(size = font_size, face = "bold"), 
+    legend.text = element_text(size = font_size),
+    legend.title = element_text(size = font_size, face = 'bold')
+    # legend.key.width = unit(7, 'cm'),
+    # plot.margin = margin(t = 10, r = 0, b = 0, l = 0)
+    # legend.spacing.y = unit(10, "cm")
+    
+  )+
+  scale_y_reverse(breaks = seq(11,1,-1), limits = c(11,1))+
+  labs(y = 'League Rank', x = '', title = '')+
+  scale_color_manual(values = brewer.pal(11, 'Paired'))+
+  guides(color = guide_legend(nrow = 6))
+```
+
+## 4 - Popular League Picks
+
+"JT's not-so-good golf is a lot better than my not-so-good golf." - Max Homa (also probably Dana who picked JT the most)
+
+```{r}
+league_picks <- dbGetQuery(conn, "
+           SELECT
+            	PLAYER.PLAYER_NAME,
+            	COUNT(PLAYER.PLAYER_NAME)::NUMERIC AS PLAYER_COUNT
+            FROM
+            	DFS_BOARD
+            	INNER JOIN ACCOUNT ON ACCOUNT.ID_ACCOUNT = DFS_BOARD.ID_ACCOUNT
+            	INNER JOIN DFS_TOTAL AS DFS ON DFS.ID_DFS IN (
+            		DFS_BOARD.ID_DFS_1,
+            		DFS_BOARD.ID_DFS_2,
+            		DFS_BOARD.ID_DFS_3,
+            		DFS_BOARD.ID_DFS_4,
+            		DFS_BOARD.ID_DFS_5,
+            		DFS_BOARD.ID_DFS_6
+            	)
+            	INNER JOIN EVENT ON EVENT.ID_EVENT = DFS.ID_EVENT
+            	INNER JOIN PLAYER ON PLAYER.DG_ID = DFS.DG_ID
+            WHERE
+            	EVENT.CALENDAR_YEAR = 2025 
+            GROUP BY
+            	PLAYER.PLAYER_NAME
+            ORDER BY
+            	PLAYER_COUNT DESC
+            LIMIT
+            	10
+           ")
+t <- league_picks %>% rename('Player' = 'player_name', 'Selected DFS Boards' = 'player_count')
+
+create_table(t)
+```
+
+## 5 - Top Value Golfers in 2025\*
+
+(\*played at least 3 PGA events). Value is listed in the FanDuel app and is calculated by the following equation:
+
+Value = (Golfer Event Score \* 1000) / Golfer Salary
+
+```{r}
+value_golfers <- dbGetQuery(conn, "
+           WITH
+          	CTE1 AS (
+          		SELECT
+          			PLAYER.PLAYER_NAME,
+          			EVENT.EVENT_NAME,
+          			TOTAL_PTS,
+          			SALARY,
+          			CASE
+          				WHEN SALARY = 0 THEN 0
+          				ELSE ROUND(((TOTAL_PTS * 1000.0) / SALARY)::NUMERIC, 1)
+          			END AS VALUE
+          		FROM
+          			DFS_TOTAL
+          			INNER JOIN EVENT ON EVENT.ID_EVENT = DFS_TOTAL.ID_EVENT
+          			INNER JOIN PLAYER ON PLAYER.DG_ID = DFS_TOTAL.DG_ID
+          		WHERE
+          			EVENT.CALENDAR_YEAR = 2025
+          			AND SALARY != 0
+          		GROUP BY
+          			EVENT.EVENT_NAME,
+          			PLAYER.PLAYER_NAME,
+          			SALARY,
+          			TOTAL_PTS
+          		ORDER BY
+          			PLAYER.PLAYER_NAME
+          	),
+          	CTE2 AS (
+          		SELECT
+          			PLAYER_NAME,
+          			COUNT(EVENT_NAME) AS event_count,
+          			ROUND((AVG(TOTAL_PTS))::NUMERIC, 1) AS avg_dfs_pts,
+          			ROUND(AVG(SALARY)::NUMERIC,1) AS avg_salary_cost,
+          			ROUND((SUM(TOTAL_PTS) * 1000.0 / SUM(SALARY))::NUMERIC, 1) AS avg_value
+          		FROM
+          			CTE1
+          		GROUP BY
+          			PLAYER_NAME
+          		order by avg_value desc
+          )
+          SELECT * FROM CTE2 WHERE EVENT_COUNT > 3 LIMIT 10
+           ")
+t <- value_golfers %>% 
+  mutate(event_count_bin = case_when(event_count <= 6 ~ '3-6',
+                                                          event_count <= 9 & event_count > 6 ~ '7-9',
+                                                          event_count >= 10 ~ '10+')) 
+```
+
+```{r, fig.width=14, fig.height=14}
+font_size <- 30
+
+ggplot(t, aes(y=reorder(player_name, avg_value), x = avg_value, col = factor(event_count_bin)))+
+  geom_segment(aes(y = player_name, yend = player_name, x = 0, xend = avg_value), 
+               color = "gray", linetype = "solid")+
+  geom_point(aes(size = avg_salary_cost))+
+  scale_x_continuous(limits = c(0,11), breaks = seq(0,11,1))+
+  theme_minimal()+
+  theme(
+    panel.grid.major.y = element_blank(), # Removes major x grid lines
+    panel.grid.minor.y = element_blank(),  # Removes minor x grid lines
+    axis.text = element_text(size = font_size), 
+    axis.title = element_text(size = font_size, face = "bold"), 
+    axis.title.x = element_text(margin = margin(t = 20)),
+    legend.text = element_text(size = font_size),
+    legend.title = element_text(size = font_size, face = 'bold'),
+    legend.position = "inside",
+    legend.position.inside = c(.4,1.25),
+    # legend.justification.inside = c(1, 0)
+    # legend.position = 'top',
+    legend.box = "horizontal",
+    # legend.position.inside = c(1,1),
+    plot.margin = margin(t = 300, r = 0, b = 20, l = 0)
+    # legend.key.width = unit(1, 'cm'),
+  )+
+  labs(y='', x='Avg Value Multiplier', col = 'Event Count', size = 'Avg Salary')+
+  scale_size_continuous(labels = dollar_format(), range = c(5, 25))+
+  # scale_size_manual(values = c(3, 5, 7, 9))+
+  scale_color_manual(values = brewer.pal(3, 'Dark2'))+
+  guides(color = guide_legend(override.aes = list(size = 20), nrow = 4), size = guide_legend(nrow = 4))
+```
+
+## 6 - Missed Cut Selections
+
+The number of golfers selected that have been cut, withdrawn, DQ'd, etc. in 2025. If you're at the top of this list, you either suck or are very unlucky. Probably the latter.
+
+```{r}
+made_cut <- dbGetQuery(conn,"
+                       WITH CTE AS(
+                        SELECT
+                        	ACCOUNT.USERNAME,
+                        	ACCOUNT.FIRST_NAME,
+                        	ACCOUNT.LAST_NAME,
+                        	COUNT(
+                        		CASE
+                        			WHEN (
+                        				DFS.FIN_TEXT IN ('CUT', ' CUT')
+                        				OR DFS.FIN_TEXT IN ('DQ', ' DQ', 'MDF', 'WD', 'W/D')
+                        			) THEN 1
+                        		END
+                        	) AS CUT_PLAYER_COUNT,
+                        	COUNT(PLAYER.PLAYER_NAME) AS TOTAL_PLAYER_COUNT
+                        FROM
+                        	DFS_BOARD
+                        	INNER JOIN ACCOUNT ON ACCOUNT.ID_ACCOUNT = DFS_BOARD.ID_ACCOUNT
+                        	INNER JOIN DFS_TOTAL AS DFS ON DFS.ID_DFS IN (
+                        		DFS_BOARD.ID_DFS_1,
+                        		DFS_BOARD.ID_DFS_2,
+                        		DFS_BOARD.ID_DFS_3,
+                        		DFS_BOARD.ID_DFS_4,
+                        		DFS_BOARD.ID_DFS_5,
+                        		DFS_BOARD.ID_DFS_6
+                        	)
+                        	INNER JOIN EVENT ON EVENT.ID_EVENT = DFS.ID_EVENT
+                        	INNER JOIN PLAYER ON PLAYER.DG_ID = DFS.DG_ID
+                        WHERE
+                        	EVENT.CALENDAR_YEAR = 2025
+                        GROUP BY
+                        	ACCOUNT.USERNAME,
+                        	ACCOUNT.FIRST_NAME,
+                        	ACCOUNT.LAST_NAME
+                        ORDER BY
+                        	CUT_PLAYER_COUNT DESC
+                        )
+                        
+                        SELECT *, ROUND((CAST(CUT_PLAYER_COUNT AS DOUBLE PRECISION)/CAST(TOTAL_PLAYER_COUNT AS DOUBLE PRECISION))::NUMERIC, 2) AS CUT_PERCENTAGE FROM CTE
+                        ORDER BY CUT_PERCENTAGE DESC
+")
+t <- made_cut %>% 
+  mutate(Manager = paste(first_name, last_name)) %>% 
+  select(Manager, username, cut_player_count, cut_percentage) %>% 
+  mutate(cut_percentage = paste(round(cut_percentage*100, 1), '%', sep = '')) %>% 
+  rename('Username' = 'username', 'Cut/WD/DQ Golfer Count' = 'cut_player_count', 'Cut Percentage' = 'cut_percentage') %>% 
+  mutate(Manager = ifelse(Manager == 'Charles Tuskan', 'C.J. Tuskan',Manager))
+
+create_table(t)
+```
+
+## 7 - Wake Up Call!
+
+```{r}
+wake_up <- dbGetQuery(conn, "
+                      WITH
+                      	CTE AS (
+                      		SELECT
+                      			ACCOUNT.USERNAME AS USERNAME,
+                      			ACCOUNT.FIRST_NAME,
+                      			ACCOUNT.LAST_NAME,
+                      			COUNT(DISTINCT EVENT.EVENT_NAME) AS EVENT_ENTRY_COUNT,
+                      			(
+                      				SELECT
+                      					COUNT(DISTINCT EVENT_NAME)
+                      				FROM
+                      					EVENT
+                      				WHERE
+                      					(CALENDAR_YEAR = 2025)
+                      					AND (EVENT.DFS_PAYOUT IS NOT NULL)
+                      			) AS TOTAL_EVENT_COUNT
+                      		FROM
+                      			DFS_BOARD
+                      			INNER JOIN ACCOUNT ON ACCOUNT.ID_ACCOUNT = DFS_BOARD.ID_ACCOUNT
+                      			INNER JOIN DFS_TOTAL AS DFS ON DFS.ID_DFS IN (
+                      				DFS_BOARD.ID_DFS_1,
+                      				DFS_BOARD.ID_DFS_2,
+                      				DFS_BOARD.ID_DFS_3,
+                      				DFS_BOARD.ID_DFS_4,
+                      				DFS_BOARD.ID_DFS_5,
+                      				DFS_BOARD.ID_DFS_6
+                      			)
+                      			INNER JOIN EVENT ON EVENT.ID_EVENT = DFS.ID_EVENT
+                      		WHERE
+                      			EVENT.CALENDAR_YEAR = 2025
+                      		GROUP BY
+                      			ACCOUNT.USERNAME,
+                      			ACCOUNT.FIRST_NAME,
+                      			ACCOUNT.LAST_NAME
+                      		ORDER BY
+                      			EVENT_ENTRY_COUNT
+                      	)
+                      SELECT
+                      	USERNAME,
+                      	FIRST_NAME,
+                      	LAST_NAME,
+                      	(TOTAL_EVENT_COUNT - EVENT_ENTRY_COUNT) AS MISSED_EVENTS
+                      FROM
+                      	CTE
+                      ORDER BY
+                      	MISSED_EVENTS DESC
+")
+t <- wake_up %>% 
+  mutate(Manager = paste(first_name, last_name)) %>% 
+  select(missed_events, Manager, username) %>% 
+  rename("Username" = 'username', 'Missed Events in 2025' = 'missed_events') %>% 
+  mutate(Manager = ifelse(Manager == 'Charles Tuskan', 'C.J. Tuskan',Manager))
+
+create_table(t)
+```
+
+```{r}
+dbDisconnect(conn)
+```

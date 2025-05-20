@@ -1,0 +1,577 @@
+---
+title: "Valero Texas Open Cut Prediction"
+author: 'C.J. Tuskan'
+date: last-modified
+format:
+ html:
+   grid:
+      sidebar-width: 1px
+      body-width: 1200px
+      margin-width: 300px
+      gutter-width: 1.5rem
+editor: visual
+df-print: kable
+embed-resources: true
+execute: 
+  echo: true
+toc: true
+---
+
+# Setup
+
+```{r}
+suppressWarnings(suppressPackageStartupMessages({
+  library(tidyverse)
+  library(ggplot2)
+  library(janitor)
+  library(jsonlite)
+  library(lubridate)
+  library(DBI)
+  library(RPostgres)
+  library(scales)
+  library(RColorBrewer)
+  library(ggimage)
+  library(DT)
+  library(mice)
+  library(lme4)
+  library(pROC)
+  library(caret)
+  library(randomForest)
+}))
+
+#source db info
+source('../../../db_creds.R')
+
+#color set
+color_cjt <- c('#F1C40F', '#34495E', '#95A5A6')
+
+# Establish a connection
+conn <- dbConnect(
+  drv = RPostgres::Postgres(),
+  dbname = dbname,
+  host = host,
+  port = port,
+  user = user,
+  password = password
+)
+```
+
+# Data Golf Cut Predictions
+
+```{r}
+dg_valero <- suppressMessages(read_csv('../../../research/Valero Texas Open/valero-texas-open_course-adjustment-model.csv') %>% clean_names())
+
+#add flags for predicted cut and actual cut
+dg_valero_2 <- dg_valero %>% 
+  mutate(made_cut_predicted = ifelse(make_cut >= 0.5, 1, 0)) %>%  #assuming >= 0.5 threshold = make cut
+  mutate(made_cut_actual = ifelse(observed_finish == 'CUT', 0, 1))
+
+glimpse(dg_valero_2)
+```
+
+```{r}
+auc <- roc(dg_valero_2$made_cut_actual, dg_valero_2$make_cut, levels = c(1,0), plot = T, direction = '>')$auc
+```
+
+```{r}
+print(auc)
+```
+
+```{r}
+# Create confusion matrix
+cm <- confusionMatrix(factor(dg_valero_2$made_cut_predicted), factor(dg_valero_2$made_cut_actual), mode = "everything", positive = '1')
+
+# Print results
+print(cm)
+```
+
+```{r}
+cat('percentage of golfers actually making the cut:  ', mean(dg_valero_2$made_cut_actual), '\n')
+cat('predicted percentage of golfers making the cut (assuming 0.5 threshold):  ', mean(dg_valero_2$made_cut_predicted))
+```
+
+One of the leading sites for golf data has an F1 score of 0.61 for cut accuracy. The purpose of this study will be to produce similar results at a minimum.
+
+# Gather event information
+
+```{r}
+events <- dbGetQuery(conn, "
+                      SELECT
+                  			*
+                  		FROM
+                  			EVENT
+                  		WHERE
+                  			EVENT_NAME LIKE '%Valero%'")
+events
+```
+
+Events go back to 2017.
+
+## Gather Course Information
+
+```{r}
+courses <- dbGetQuery(conn, "
+                      WITH CTE1 AS (SELECT DISTINCT
+                      	ID_COURSE
+                      FROM
+                      	ROUND
+                      WHERE
+                      	ID_EVENT IN (
+                      		SELECT
+                      			ID_EVENT
+                      		FROM
+                      			EVENT
+                      		WHERE
+                      			EVENT_NAME LIKE '%Valero%'
+                      	)
+                      )
+                      
+                      select * from course where id_course in (SELECT * FROM CTE1)")
+courses
+```
+
+There is only one course involved with this tournament.
+
+## Advanced Stat EDA
+
+```{r}
+rounds <- dbGetQuery(conn, "
+                      SELECT
+                      	ROUND.*,
+                      	EVENT.CALENDAR_YEAR
+                      FROM
+                      	ROUND
+                      	INNER JOIN EVENT ON EVENT.ID_EVENT = ROUND.ID_EVENT
+                      WHERE
+                      	ROUND.ID_COURSE = 'cf8c066a-2b81-4b7f-a661-d98e2774955a'")
+rounds
+```
+
+```{r}
+summary(is.na(rounds))
+```
+
+There are only a few dozen missing values in prox_rgh which can be imputed if necessary.
+
+```{r}
+#gather finish info
+finish <- dbGetQuery(conn, "
+                      SELECT
+                      	DFS_TOTAL.ID_EVENT,
+                      	DFS_TOTAL.DG_ID,
+                      	DFS_TOTAL.FIN_TEXT,
+                      	EVENT.CALENDAR_YEAR
+                      FROM
+                      	DFS_TOTAL
+                      	INNER JOIN EVENT ON EVENT.ID_EVENT = DFS_TOTAL.ID_EVENT
+                      WHERE
+                      	DFS_TOTAL.ID_EVENT IN (
+                      		SELECT
+                      			ID_EVENT
+                      		FROM
+                      			EVENT
+                      		WHERE
+                      			EVENT_NAME LIKE '%Valero%'
+                      	)  
+                      ")
+finish
+```
+
+```{r}
+#add made_cut column
+finish_with_cut <- finish %>% 
+  filter(!fin_text %in% c('W/D', ' W/D', 'WD', 'DQ', 'MDF', ' WD')) %>% 
+  mutate(made_cut = ifelse(!fin_text %in% c('CUT', ' CUT'), 1, 0))
+
+#shift calendar_year +1 to easily join previous year's cut information to current year preliminary round data
+finish_with_cut_prev <- finish_with_cut %>% 
+  mutate(calendar_year = calendar_year+1) %>% 
+  arrange(calendar_year) %>% 
+  filter(calendar_year<=max(finish_with_cut$calendar_year)) %>% 
+  mutate(made_cut_prev = made_cut) %>% 
+  select(-made_cut)
+  
+
+finish %>%
+  filter(fin_text %in% c('CUT', ' CUT')) %>% 
+  group_by(calendar_year) %>% 
+  summarize(count = n(), .groups = 'drop')
+```
+
+There are cuts every year.
+
+# Impute Missing Data
+
+```{r}
+# Perform multiple imputation
+imputed_data <- suppressWarnings(mice(rounds, m = 5, method = "pmm", maxit = 5, seed = 1842, printFlag = F))
+
+# View completed dataset
+rounds_imputed <- complete(imputed_data)
+
+summary(is.na(rounds_imputed))
+```
+
+```{r}
+glimpse(rounds_imputed)
+```
+
+```{r}
+rounds_sg <- rounds_imputed %>% 
+  filter(round %in% c(1,2)) %>% 
+  select(calendar_year, dg_id, round, sg_putt, sg_ott, sg_app, driving_dist, driving_acc)
+  # group_by(calendar_year, dg_id) %>% 
+  # summarise(sg_putt_avg = mean(sg_putt), sg_ott_avg = mean(sg_ott), sg_app_avg = mean(sg_app), .groups = 'drop')
+glimpse(rounds_sg)
+```
+
+```{r}
+#add in whether made cut
+rounds_sg_with_finish <- rounds_sg %>% 
+  left_join(finish %>% 
+              select(dg_id, calendar_year, fin_text), by = c('calendar_year', 'dg_id'), relationship = 'many-to-one')
+
+#filter out withdraws, dq's, etc
+rounds_sg_filtered <- rounds_sg_with_finish %>% 
+  filter(!fin_text %in% c('W/D', ' W/D', 'WD', 'DQ', 'MDF', ' WD'))
+
+rounds_sg_small <- rounds_sg_filtered %>% 
+  mutate(made_cut = ifelse(!fin_text %in% c('CUT', ' CUT'), 1, 0)) %>% 
+  select(-fin_text) %>% 
+  mutate(round = factor(round))
+glimpse(rounds_sg_small)
+```
+
+# Scale Data
+
+Driving distance is scaled by year to align with strokes gained calculations.
+
+```{r}
+rounds_sg_final <- rounds_sg_small %>%
+          group_by(calendar_year) %>%
+          mutate_at(c("driving_dist"), ~(scale(.) %>% as.vector))
+glimpse(rounds_sg_final)
+```
+
+# Training & Test Set
+
+Training set will include years 2018 - 2023 (skipping 2020 due to Covid). This is to allow for a validation and test year, and also for an initial year as a flag may be utilized to indicate if the golfer had made the cut in a prior year.
+
+```{r}
+train <- rounds_sg_final %>% filter(! calendar_year %in% c(2017, 2024, 2025))
+val <- rounds_sg_final %>% filter(calendar_year == 2024)
+test <- rounds_sg_final %>% filter(calendar_year == 2025)
+```
+
+# Course Models
+
+## Prelim Mixed Model
+
+Random effects for each golfer throughout the course of training data years looking at repeated measures for all first and second rounds.
+
+```{r}
+mod_null_prelim <- glmer(made_cut ~ 1 + (1|dg_id), family = binomial, data = train)
+summary(mod_null_prelim)
+```
+
+```{r}
+mod_prelim <- glmer(made_cut ~ sg_putt + sg_ott + sg_app + (1|dg_id), family = binomial, data = train)
+summary(mod_prelim)
+```
+
+```{r}
+anova(mod_null_prelim, mod_prelim)
+```
+
+## Repeated Measures Mixed Model
+
+Layer 1 player & crossed random effects with layer 2 year, looking at repeated round 1 & round 2 measures for each tournament year and fixed strokes gained effects to model the cut line.
+
+```{r}
+mod_null <- glmer(made_cut ~ 1 + (1|calendar_year:dg_id), family = binomial, data = train)
+summary(mod_null)
+```
+
+```{r}
+mod1 <- glmer(made_cut ~ sg_putt + sg_ott + sg_app + (1|calendar_year:dg_id), family = binomial, data = train)
+summary(mod1)
+```
+
+```{r}
+anova(mod_null, mod1)
+```
+
+## Logistic Regression Model
+
+Only strokes gained fixed effects used to model the cut line.
+
+```{r}
+modlr_null <- glm(made_cut ~ 1, family = binomial, data = train)
+summary(modlr_null)
+```
+
+```{r}
+modlr <- glm(made_cut ~ sg_app + sg_putt + sg_ott, family = binomial, data = train)
+summary(modlr)
+```
+
+```{r}
+anova(modlr_null, modlr)
+```
+
+## Course Model Analysis
+
+All models seem to portray strokes gained off the tee as the most important. Mixed Model 1 will be utilized moving forward as there was evidence supporting the calendar year \<-\> golfer interaction having a major impact on making the cut. This may be due to weather or participating golfer competition. The low AIC also supports model 1.
+
+The log odds of fixed effects for model 1 are 0.4601 (strokes gained putting), 0.6488 (strokes gained off the tee), 0.4789 (strokes gained approach). All 3 inputs are significant, but there is a larger significance for strokes gained off the tee indicating golfers with better driving skills are more likely to make the cut (almost 2x more likely vs 1.5 times more likely for putting and approach). The ratio of higher significance is 0.6488/(\~0.47) = \~1.4.
+
+This ratio will be used to generate another weighted model that utilizes recent golfer performance to predict if they will make the cut in a future tournament (2025). But before that, other driving attributes will be added to the model to see if the fit can be improved.
+
+## Repeated Measures Mixed Model 2
+
+```{r}
+mod2 <- glmer(made_cut ~ sg_putt + sg_ott + sg_app + driving_acc + (1|calendar_year:dg_id), family = binomial, data = train)
+summary(mod2)
+```
+
+Driving accuracy heavily correlates with strokes gained off the tee, so this metric and model will be excluded.
+
+## Repeated Measures Mixed Model 3
+
+```{r}
+mod3 <- glmer(made_cut ~ sg_putt + sg_ott + sg_app + driving_dist + (1|calendar_year:dg_id), family = binomial, data = train)
+summary(mod3)
+```
+
+Driving Distance does not seem to add much of an effect so therefore, will also be excluded.
+
+## Conclusion
+
+Model 1 will be chosen as the baseline indicators for making the cut at RBC Heritage.
+
+# Golfer Feature Engineering
+
+In order to predict how a golfer may fare in an upcoming tournament, training data will compile round information over a time period prior to RBC Heritage (rounds 1 & 2) for the subsequent year. An additional binary metric of whether the golfer made the RBC Heritage cut in the previous year will be added in an attempt to incorporate previous success. Various logistic regression and linear regression models will be trained and tested.
+
+## Preliminary Round Data Function
+
+```{r}
+#months_of_data -> int    (e.g. 3 = three months worth of data)
+#all_rounds     -> bool   (T -> rounds 1,2,3,4    F -> rounds 1,2)
+get_prelim_rounds <- function(months_of_data, all_rounds){
+  #set all_rounds string
+  all_rounds_str <- '1,2'
+  if(all_rounds){
+    all_rounds_str <- '1,2,3,4'
+  }
+  
+  #set placeholder for round information
+  prelim_rounds <- data.frame()
+  
+  #loop through events to get date range for pulling other rounds
+  for(yr in (events %>% filter(calendar_year >2017))$calendar_year){
+    #get the event
+    e <- events %>% filter(calendar_year == yr)
+    
+    #grab golfer preliminary round data
+    r <- dbGetQuery(conn,paste("
+                    SELECT
+                    	ROUND.ID_EVENT,
+                    	EVENT.CALENDAR_YEAR,
+                    	EVENT.EVENT_NAME,
+                    	ROUND.DG_ID,
+                    	PLAYER.PLAYER_NAME,
+                    	ROUND.ROUND,
+                    	ROUND.TEETIME,
+                    	ROUND.SCORE,
+                    	ROUND.SG_OTT,
+                    	ROUND.SG_PUTT,
+                    	ROUND.SG_APP
+                    FROM
+                    	ROUND
+                    	INNER JOIN EVENT ON EVENT.ID_EVENT = ROUND.ID_EVENT
+                    	INNER JOIN PLAYER ON PLAYER.DG_ID = ROUND.DG_ID
+                    WHERE
+                    	ROUND.ID_EVENT IN (
+                    		SELECT
+                    			ID_EVENT
+                    		FROM
+                    			EVENT --in list()
+                    		WHERE
+                    			DATE < DATE('",as.character(e$date),"') --filter per year to find a good date
+                    			AND DATE >= DATE('",as.character(e$date - months(months_of_data)),"')
+                    		ORDER BY
+                    			DATE DESC
+                    	)
+                    	--AND ROUND.DG_ID = 8825
+                    	AND ROUND.DG_ID IN (SELECT DG_ID FROM ROUND WHERE ID_EVENT = '", e$id_event, "')
+                    	AND ROUND.ROUND IN (", all_rounds_str,")
+                    	AND ROUND.SG_OTT IS NOT NULL
+                    	AND ROUND.SG_PUTT IS NOT NULL
+                    	AND ROUND.SG_APP IS NOT NULL
+                      --LIMIT 1000
+                      ", sep = ''))
+    
+    #group by golfer
+    r <- r %>% group_by(dg_id, player_name) %>% arrange(dg_id)
+    
+    #append
+    prelim_rounds <- rbind(prelim_rounds, r)
+  }
+  
+  #add finish information (made_cut)
+  #0 -> missed cut
+  #1 -> made cut
+  prelim_rounds <- prelim_rounds %>% 
+    left_join(finish_with_cut %>% select(-id_event), by = c('calendar_year', 'dg_id'), relationship = 'many-to-one') %>% 
+    ungroup() %>% 
+    filter(!is.na(fin_text))
+  
+  #add previous year cut information (made_cut_prev)
+  #0 -> missed cut
+  #1 -> made cut
+  #2 -> didn't play
+  prelim_rounds <- prelim_rounds %>% 
+    left_join(finish_with_cut_prev %>% select(-id_event, -fin_text), by = c('calendar_year', 'dg_id'), relationship = 'many-to-one') %>% 
+    ungroup() %>% 
+    mutate(made_cut_prev = ifelse(is.na(made_cut_prev), 2, made_cut_prev))
+  
+  return(prelim_rounds)
+}
+```
+
+# Model 1
+
+-   averaged strokes gained measures from 4 months of prior tournaments, all available rounds
+-   golfer random effects logistic regression
+
+```{r}
+#get prelim data 
+prelim_rounds <- get_prelim_rounds(4, T) #4 months preliminary data, rounds 1-4 (all available with strokes gained data. NA's excluded)
+
+#train/val/test
+train_1 <- prelim_rounds %>% filter(! calendar_year %in% c(2017, 2024, 2025))
+val_1 <- prelim_rounds %>% filter(calendar_year == 2024)
+test_1 <- prelim_rounds %>% filter(calendar_year == 2025)
+
+train_1_avg <- train_1 %>% 
+  group_by(dg_id, calendar_year, factor(made_cut), factor(made_cut_prev)) %>% 
+  reframe(mean_sg_ott = mean(sg_ott), mean_sg_putt = mean(sg_putt), mean_sg_app = mean(sg_app), count_measures = length(sg_app)) %>% 
+  rename('made_cut' = `factor(made_cut)`, 'made_cut_prev' = `factor(made_cut_prev)`)
+```
+
+## Null Model
+
+```{r}
+mod_null_1 <- glmer(made_cut ~ 1 + (1|dg_id), family = binomial, data = train_1_avg)
+summary(mod_null_1)
+```
+
+```{r}
+mod_1 <- glmer(made_cut ~ mean_sg_putt + mean_sg_ott + mean_sg_app + (1|dg_id), family = binomial, data = train_1_avg)
+summary(mod_1)
+```
+
+## Predictions
+
+```{r}
+val_1_avg <- val_1 %>% 
+  group_by(dg_id, calendar_year, factor(made_cut), factor(made_cut_prev)) %>% 
+  reframe(mean_sg_ott = mean(sg_ott), mean_sg_putt = mean(sg_putt), mean_sg_app = mean(sg_app), count_measures = length(sg_app)) %>% 
+  rename('made_cut' = `factor(made_cut)`, 'made_cut_prev' = `factor(made_cut_prev)`)
+pred_probs <- predict(mod_1, newdata = val_1_avg %>% select(mean_sg_putt, mean_sg_ott, mean_sg_app, calendar_year, dg_id), type = "response", allow.new.levels = T)
+
+auc <- roc(val_1_avg$made_cut, pred_probs, levels = c(1,0), plot = T, direction = '>')$auc
+```
+
+```{r}
+print(auc)
+```
+
+```{r}
+df_preds <- as.data.frame(pred_probs) %>% 
+  mutate(prediciton = ifelse(pred_probs >= 0.5, 1, 0))
+
+# Create confusion matrix
+cm <- confusionMatrix(factor(val_1_avg$made_cut), factor(df_preds$prediciton), mode = "everything", positive = '1')
+
+# Print results
+print(cm)
+```
+
+This model produces an F1 score of 0.69 which is a good start as this is better than Data Golf's prediction. However, the AUC is slightly lower at 0.60 (vs 0.66).
+
+```{r}
+cat('percentage of golfers actually making the cut in the validation set:  ', mean(as.numeric(val_1_avg$made_cut)-1), '\n')
+cat('predicted percentage of golfers making the cut for validation input:  ', mean(df_preds$prediciton), '\n')
+cat('ratio of golfers making the cut in the training data:  ', mean(as.numeric(train_1_avg$made_cut)-1), '\n')
+cat('count of golfers in validation set (2024 tournament):  ', length(val_1_avg$dg_id), '\n')
+cat('predicted number of golfers to make the cut in the validation set:  ', round(mean(df_preds$prediciton)*length(val_1_avg$dg_id), 0))
+```
+
+The ratio of golfers predicted to make the cut is heavy at 0.68 which slightly invalidates F1 score since the predicted values are imbalanced. AUC is more reliable, so this model has not improved performance over data golf. With that said, 148 golfers is a large number. Combined with the predicted ratio to make the cut, this results in 101 golfers which is way higher than the \~65 standard for Valero.
+
+The threshold can be increased for predicted probability to make the cut to decrease the number of golfers that make the cut.
+
+```{r}
+df_preds <- as.data.frame(pred_probs) %>% 
+  mutate(prediciton = ifelse(pred_probs >= 0.565, 1, 0))
+
+# Create confusion matrix
+cm <- confusionMatrix(factor(val_1_avg$made_cut), factor(df_preds$prediciton), mode = "everything", positive = '1')
+
+# Print results
+print(cm)
+```
+
+```{r}
+cat('percentage of golfers actually making the cut in the validation set:  ', mean(as.numeric(val_1_avg$made_cut)-1), '\n')
+cat('predicted percentage of golfers making the cut for validation input:  ', mean(df_preds$prediciton), '\n')
+cat('ratio of golfers making the cut in the training data:  ', mean(as.numeric(train_1_avg$made_cut)-1), '\n')
+cat('count of golfers in validation set (2024 tournament):  ', length(val_1_avg$dg_id), '\n')
+cat('predicted number of golfers to make the cut in the validation set:  ', round(mean(df_preds$prediciton)*length(val_1_avg$dg_id), 0))
+```
+
+The F1 score decreases when the predicted probability threshold is increased which suggests this model is overfit or not ideal. It might make more sense to look at a linear regression model for score after 2 rounds, then select the lowest 65 to 70 predicted scores as the cut line (for ties). This number can be adjusted depending on what the model is used for (e.g. for betting, a tighter threshold to limit losses)
+
+# CONTINUE HERE
+
+# Model 2
+
+same thing but with weight of strokes gained off the tee. Could also try median instead of mean
+
+# Model 3
+
+same thing but lin reg for score (determine top \~65 from there). Can try with/without weight. If including all preliminary rounds 1-4, this could also be useful to model top 10, 20, etc
+
+# Model 4
+
+Random Forest? Other non regression models? simulations/monte carlo since data sets are small?
+
+This would require a separate analysis that could be sourced, but analyze all courses similar to what was done with TPC San Antonio - AT&T Oaks. Look for courses with similar strokes gained off the tee importance. utilize golfer performance from these courses as opposed to all previous courses played.
+
+# Random Forest
+
+```{r}
+train_1_avg <- train_1 %>% 
+  group_by(dg_id, calendar_year, made_cut, made_cut_prev) %>% 
+  reframe(mean_sg_ott = mean(sg_ott), mean_sg_putt = mean(sg_putt), mean_sg_app = mean(sg_app), count_measures = length(sg_app))
+  # rename('made_cut' = `factor(made_cut)`, 'made_cut_prev' = `factor(made_cut_prev)`)
+rf_model <- randomForest(made_cut ~ mean_sg_putt + mean_sg_ott + mean_sg_app + made_cut_prev, data = train_1_avg)
+print(importance(rf_model))
+
+
+```
+
+```{r}
+val_1_avg <- val_1 %>% 
+  group_by(dg_id, calendar_year, made_cut, made_cut_prev) %>% 
+  reframe(mean_sg_ott = mean(sg_ott), mean_sg_putt = mean(sg_putt), mean_sg_app = mean(sg_app), count_measures = length(sg_app))
+
+pred_probs <- predict(rf_model, newdata = val_1_avg %>% select(mean_sg_putt, mean_sg_ott, mean_sg_app, calendar_year, dg_id, made_cut_prev), type = "response")
+
+auc <- roc(as.numeric(val_1_avg$made_cut)-1, pred_probs)$auc
+print(auc)
+```
+
+# Conclusion
