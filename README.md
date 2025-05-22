@@ -21,13 +21,13 @@ As commissioner of a PGA Golf Daily Fantasy Sports (DFS) League, it is advantage
 -   which DFS league member has the best 'made-cut' percentage?
 -   which DFS league member has missed the most contests? (forgot to set their lineup)
 
-# Database Schema
-
-![](Images/pga_db_schema.png)
-
 # Purpose
 
 Web-scraping is against the Terms and Conditions of DFS websites (and many other sports data websites), so a subscription was purchased from DataGolf.com which includes historical PGA course statistics and DFS statistics through partnerships. Data is accessed through an API which is great for limited information (e.g. last year's Masters results, upcoming event/course information, DFS salaries for a specific event, etc). However, the API would require tedious looped scripts for any potential predictive model building. Therefore, **the purpose of this repository is to develop a database of historical PGA golfer data as well as DFS data that is continuously updated on a weekly basis.** The database can then be queried for efficient analytics and predictive modeling.
+
+# Database Schema
+
+![](Images/pga_db_schema.png)
 
 # Files & Folders
 
