@@ -466,7 +466,7 @@ train_1_avg <- train_1 %>%
 mod_null_1 <- glmer(made_cut ~ 1 + (1|dg_id), family = binomial, data = train_1_avg)
 summary(mod_null_1)
 ```
-
+## Mixed Model
 ```{r}
 mod_1 <- glmer(made_cut ~ mean_sg_putt + mean_sg_ott + mean_sg_app + (1|dg_id), family = binomial, data = train_1_avg)
 summary(mod_1)
@@ -490,7 +490,7 @@ print(auc)
 
 ```{r}
 df_preds <- as.data.frame(pred_probs) %>% 
-  mutate(prediciton = ifelse(pred_probs >= 0.5, 1, 0))
+  mutate(prediciton = ifelse(pred_probs >= 0.50, 1, 0))
 
 # Create confusion matrix
 cm <- confusionMatrix(factor(val_1_avg$made_cut), factor(df_preds$prediciton), mode = "everything", positive = '1')
