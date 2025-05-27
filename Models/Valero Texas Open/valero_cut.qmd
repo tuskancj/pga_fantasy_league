@@ -504,8 +504,9 @@ This model produces an F1 score of 0.69 which is a good start as this is better 
 ```{r}
 cat('percentage of golfers actually making the cut in the validation set:  ', mean(as.numeric(val_1_avg$made_cut)-1), '\n')
 cat('predicted percentage of golfers making the cut for validation input:  ', mean(df_preds$prediciton), '\n')
-cat('ratio of golfers making the cut in the training data:  ', mean(as.numeric(train_1_avg$made_cut)-1), '\n')
+# cat('ratio of golfers making the cut in the training data:  ', mean(as.numeric(train_1_avg$made_cut)), '\n')
 cat('count of golfers in validation set (2024 tournament):  ', length(val_1_avg$dg_id), '\n')
+cat('actual number of golfers to make the cut in the validation set:  ', sum(as.numeric(val_1_avg$made_cut)-1), '\n')
 cat('predicted number of golfers to make the cut in the validation set:  ', round(mean(df_preds$prediciton)*length(val_1_avg$dg_id), 0))
 ```
 
@@ -527,8 +528,9 @@ print(cm)
 ```{r}
 cat('percentage of golfers actually making the cut in the validation set:  ', mean(as.numeric(val_1_avg$made_cut)-1), '\n')
 cat('predicted percentage of golfers making the cut for validation input:  ', mean(df_preds$prediciton), '\n')
-cat('ratio of golfers making the cut in the training data:  ', mean(as.numeric(train_1_avg$made_cut)-1), '\n')
+# cat('ratio of golfers making the cut in the training data:  ', mean(as.numeric(train_1_avg$made_cut)), '\n')
 cat('count of golfers in validation set (2024 tournament):  ', length(val_1_avg$dg_id), '\n')
+cat('actual number of golfers to make the cut in the validation set:  ', sum(as.numeric(val_1_avg$made_cut)-1), '\n')
 cat('predicted number of golfers to make the cut in the validation set:  ', round(mean(df_preds$prediciton)*length(val_1_avg$dg_id), 0))
 ```
 
