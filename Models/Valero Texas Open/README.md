@@ -13,7 +13,7 @@ The purpose of this study is to predict which golfers make the 2025 Valero Texas
 # Data
 
 -   Valero Texas Open Round data with advanced stats (strokes gained) are available 2017 onward from Datagolf.com
--   A couple dozen rounds were missing proximity in the rough data so they were imputed from the other round data
+-   A couple dozen rounds were missing proximity from the rough data so they were imputed from the other round data
 -   training set: 2018 - 2023
 -   validation set: 2024
 -   test set: 2025
@@ -55,4 +55,4 @@ The F1 score decreases when the predicted probability threshold is increased fro
 
 Instead of training on prior 4 months of all available PGA events for each golfer, an analysis is being compiled for all courses with at least 3 prior years of round data. Courses with similar strokes gained significance between putting, off-the-tee, and approach will be utilized to train, validate, and test a model.
 
-Furthermore, linear regression may be utilized to predict stroke count after 2 rounds in order to more accurately select golfers within the cut line (typically top ~65 golfers).
+Furthermore, linear regression may be utilized to predict stroke count after 2 rounds in order to more accurately select golfers within the cut line (typically top \~65 golfers).
