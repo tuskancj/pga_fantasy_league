@@ -1,0 +1,180 @@
+---
+title: "PGA Course Analysis"
+author: 'C.J. Tuskan'
+date: last-modified
+format:
+ html:
+   grid:
+      sidebar-width: 1px
+      body-width: 1200px
+      margin-width: 300px
+      gutter-width: 1.5rem
+editor: visual
+df-print: kable
+embed-resources: true
+execute: 
+  echo: true
+toc: true
+---
+
+# Setup
+
+```{r}
+suppressWarnings(suppressPackageStartupMessages({
+  library(tidyverse)
+  library(ggplot2)
+  library(janitor)
+  library(jsonlite)
+  library(lubridate)
+  library(DBI)
+  library(RPostgres)
+  library(scales)
+  library(RColorBrewer)
+  library(ggimage)
+  library(DT)
+  library(mice)
+  library(lme4)
+  library(pROC)
+  library(caret)
+  library(randomForest)
+}))
+
+#source db info
+source('../../db_creds.R')
+
+#color set
+color_cjt <- c('#F1C40F', '#34495E', '#95A5A6')
+
+# Establish a connection
+conn <- dbConnect(
+  drv = RPostgres::Postgres(),
+  dbname = dbname,
+  host = host,
+  port = port,
+  user = user,
+  password = password
+)
+
+# Check the connection
+if (!is.null(conn)) {
+  print("Connection successful!")
+} else {
+  print("Connection failed!")
+}
+```
+
+```{r}
+#get list of courses where 3 or more events have been played and the last event was within the last year
+courses <- dbGetQuery(conn, "
+with cte1 as (
+        --individual golfer positions and dfs scoring for each course
+        select
+            round.id_course,
+            course.course_name,
+            course.course_par,
+            round.id_event,
+            event.event_name,
+            event.date,
+            round.dg_id,
+            dfs_total.fin_text,
+            dfs_total.total_pts,
+            CASE
+                WHEN dfs_total.fin_text not in (' CUT', 'CUT') THEN 1
+                ELSE 0
+            END AS made_cut
+        from
+            round
+            inner join course on course.id_course = round.id_course
+            inner join event on event.id_event = round.id_event
+            inner JOIN dfs_total on dfs_total.id_event = round.id_event
+            and dfs_total.dg_id = round.dg_id
+        where
+            -- event.event_name like '%Masters%'
+            -- event.calendar_year = 2025
+            dfs_total.fin_text not in (
+                'W/D',
+                ' W/D',
+                'WD',
+                'DQ',
+                'MDF',
+                ' WD'
+            )
+        GROUP BY
+            round.id_course,
+            course.course_name,
+            course.course_par,
+            round.id_event,
+            event.event_name,
+            event.date,
+            round.dg_id,
+            dfs_total.fin_text,
+            dfs_total.total_pts
+        ORDER BY dfs_total.total_pts desc
+    ),
+    
+    cte2 as (
+        -- total golfer count and made cut count grouped by course and year
+        select
+            id_course,
+            course_name,
+            course_par,
+            id_event,
+            event_name,
+            date,
+            count(distinct dg_id) as count_total_golfers,
+            sum(made_cut) as count_made_cut,
+            round(avg(total_pts)::NUMERIC, 1) as avg_dfs_points
+        from cte1
+            -- where event_name like '%Masters%'
+        GROUP BY
+            id_course,
+            course_name,
+            course_par,
+            id_event,
+            event_name,
+            date
+        ORDER BY date
+    ),
+    
+    cte3 as (
+        --count of events grouped by course
+        select
+            id_course,
+            course_name,
+            course_par,
+            count(distinct id_event) as count_events,
+            count(distinct event_name) as count_event_name,
+            max(extract(year from date)) as last_event
+        from cte2
+        group by
+            id_course,
+            course_name,
+            course_par
+        order by count_events desc
+    )
+select * from cte3 where last_event in (2024, 2025) and count_events >= 3")
+
+courses
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

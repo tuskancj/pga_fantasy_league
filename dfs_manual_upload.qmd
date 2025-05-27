@@ -134,8 +134,8 @@ Manually input the year, DataGolf event id, and filename information:
 
 ```{r}
 year <- 2025
-event <- 480
-selected_file = '16_board.csv'
+event <- 33
+selected_file = '17_board.csv'
 
 #compile filepath - do not edit
 dir <- paste('../dfs_boards/', year, '/', sep = '')
@@ -341,13 +341,13 @@ sql <- paste("
           	INNER JOIN PLAYER ON PLAYER.DG_ID = DFS.DG_ID
           WHERE
           	EVENT.ID_EVENT = '", id_event$id_event, "'
-          	-- account.USERNAME = 'azaj'
+          	-- and account.USERNAME = 'cjt3'
           ORDER BY
           	DATE DESC,
           	TOTAL_PTS DESC", sep = '')
 
 df_board_outcome <- dbGetQuery(conn, sql)
-df_board_outcome %>% group_by(username) %>% summarize(username, event_name, event_id, id_event, date, player_name, total_pts) %>% filter(username == 'jwtownse')
+df_board_outcome %>% group_by(username) %>% reframe(username, event_name, event_id, id_event, date, player_name, total_pts) %>% filter(username == 'cjt3')
 ```
 
 

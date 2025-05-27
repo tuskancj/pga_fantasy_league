@@ -59,7 +59,7 @@ conn <- dbConnect(
 # Data Golf Cut Predictions
 
 ```{r}
-dg_valero <- suppressMessages(read_csv('../../../research/Valero Texas Open/valero-texas-open_course-adjustment-model.csv') %>% clean_names())
+dg_valero <- suppressMessages(read_csv('../../../data/valero-texas-open_course-adjustment-model.csv') %>% clean_names())
 
 #add flags for predicted cut and actual cut
 dg_valero_2 <- dg_valero %>% 
