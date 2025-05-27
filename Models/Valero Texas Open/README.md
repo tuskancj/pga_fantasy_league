@@ -56,3 +56,5 @@ The F1 score decreases when the predicted probability threshold is increased fro
 Instead of training on prior 4 months of all available PGA events for each golfer, an analysis is being compiled for all courses with at least 3 prior years of round data. Courses with similar strokes gained significance between putting, off-the-tee, and approach will be utilized to train, validate, and test a model.
 
 Furthermore, linear regression may be utilized to predict stroke count after 2 rounds in order to more accurately select golfers within the cut line (typically top \~65 golfers).
+
+Simulation and Monte carlo methods can also be utilized since there are relatively small amounts of golfer data.
