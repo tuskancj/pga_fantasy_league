@@ -93,7 +93,6 @@ cat('predicted percentage of golfers making the cut (assuming 0.5 threshold):  '
 One of the leading sites for golf data has an F1 score of 0.61 for cut accuracy. The purpose of this study will be to produce similar results at a minimum.
 
 # Gather event information
-
 ```{r}
 events <- dbGetQuery(conn, "
                       SELECT
@@ -466,7 +465,9 @@ train_1_avg <- train_1 %>%
 mod_null_1 <- glmer(made_cut ~ 1 + (1|dg_id), family = binomial, data = train_1_avg)
 summary(mod_null_1)
 ```
+
 ## Mixed Model
+
 ```{r}
 mod_1 <- glmer(made_cut ~ mean_sg_putt + mean_sg_ott + mean_sg_app + (1|dg_id), family = binomial, data = train_1_avg)
 summary(mod_1)

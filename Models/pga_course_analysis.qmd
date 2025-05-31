@@ -41,6 +41,7 @@ suppressWarnings(suppressPackageStartupMessages({
 
 #source db info
 source('../../db_creds.R')
+source('../../helper.R')
 
 #color set
 color_cjt <- c('#F1C40F', '#34495E', '#95A5A6')
@@ -63,11 +64,19 @@ if (!is.null(conn)) {
 }
 ```
 
+# Gather List of Courses
+
+Filters:
+
+* 3 or more events have been played at the course
+* the last event at the course was within the last year
+* the event at the course has a cut
+
 ```{r}
-#get list of courses where 3 or more events have been played and the last event was within the last year
 courses <- dbGetQuery(conn, "
-with cte1 as (
-        --individual golfer positions and dfs scoring for each course
+with
+    cte1 as (
+        --individual golfer positions and dfs scoring grouped for each course
         select
             round.id_course,
             course.course_name,
@@ -111,7 +120,6 @@ with cte1 as (
             dfs_total.total_pts
         ORDER BY dfs_total.total_pts desc
     ),
-    
     cte2 as (
         -- total golfer count and made cut count grouped by course and year
         select
@@ -135,17 +143,19 @@ with cte1 as (
             date
         ORDER BY date
     ),
-    
     cte3 as (
-        --count of events grouped by course
+        --count of events grouped by course and filtering out courses without a cut
         select
             id_course,
             course_name,
             course_par,
             count(distinct id_event) as count_events,
             count(distinct event_name) as count_event_name,
-            max(extract(year from date)) as last_event
+            max(extract(year from date)) as last_event,
+            min(extract(year from date)) as first_event
         from cte2
+        where count_total_golfers != count_made_cut
+        and date < '2025-04-06' -- PRIOR TO VALERO TEXAS OPEN
         group by
             id_course,
             course_name,
@@ -157,18 +167,155 @@ select * from cte3 where last_event in (2024, 2025) and count_events >= 3")
 courses
 ```
 
+# Find Strokes Gained Attributes
 
+The courses are looped
+if strokes gained data can be imputed, it is, otherwise the data from that calendar year is dropped
 
+```{r}
+log_missing_values <- data.frame()
+effects <- data.frame()
+impute_threshold <- 0.33
 
+##FOR EACH ROUND AT COURSE WITHIN CALENDAR YEAR
 
+for(i in 1:length(courses$id_course)){
+  c <- courses[i,]
+  print(paste('working on ', c$course_name, sep = ''))
 
+  rounds <- dbGetQuery(conn, paste("
+                        SELECT
+                        	ROUND.*,
+                        	EVENT.CALENDAR_YEAR
+                        FROM
+                        	ROUND
+                        	INNER JOIN EVENT ON EVENT.ID_EVENT = ROUND.ID_EVENT
+                        WHERE
+                        	ROUND.ID_COURSE = '", c$id_course,"'", sep = ''))
+  
+  #if there are missing values, impute as long as missing data is not higher than threshold in any sg column of interest or total metadata
+  round_check <- rounds %>% 
+    group_by(calendar_year) %>% 
+    summarise(total_true = sum(across(everything(), ~ sum(is.na(.)))),
+              total_false = sum(across(everything(), ~ sum(!is.na(.)))),
+              total_sg_ott_true = sum(across(sg_ott, ~sum(is.na(.)))),
+              total_sg_ott_false = sum(across(sg_ott, ~sum(!is.na(.)))),
+              total_sg_app_true = sum(across(sg_app, ~sum(is.na(.)))),
+              total_sg_app_false = sum(across(sg_app, ~sum(!is.na(.)))),
+              total_sg_putt_true = sum(across(sg_putt, ~sum(is.na(.)))),
+              total_sg_putt_false = sum(across(sg_putt, ~sum(!is.na(.))))
+              ) %>% 
+    mutate(prop_missing_total = total_true/(total_true+total_false)) %>% 
+    mutate(prop_missing_sg_ott = total_sg_ott_true/(total_sg_ott_true + total_sg_ott_false)) %>% 
+    mutate(prop_missing_sg_app = total_sg_app_true/(total_sg_app_true + total_sg_app_false)) %>% 
+    mutate(prop_missing_sg_putt = total_sg_putt_true/(total_sg_putt_true + total_sg_putt_false)) %>% 
+    cbind(id_course = c$id_course, course_name = c$course_name) %>% 
+    select(id_course, course_name, calendar_year, prop_missing_sg_ott, prop_missing_sg_app, prop_missing_sg_putt, prop_missing_total) %>% 
+    mutate(missing_a_lot = case_when(prop_missing_sg_app > impute_threshold | 
+                                     prop_missing_sg_ott > impute_threshold | 
+                                     prop_missing_sg_putt > impute_threshold ~ 1,
+                                     .default = 0))
+  
+  #log missing value summary
+  log_missing_values <- log_missing_values %>% rbind(round_check)
+  
+  #filter out years with a lot of missing data
+  round_check <- round_check %>% filter(missing_a_lot == 0)
+  rounds <- rounds %>% filter(calendar_year %in% round_check$calendar_year)
+  
+  #if sg data from all rounds are missing, skip this course
+  if(length(rounds$id_round)==0){
+    next
+  }
+  
+  ## IMPUTE MISSING VALUES IF NECESSARY
+  
+  #sum the missing values from all sg columns
+  if((round_check %>% summarise(sg_missing = sum(prop_missing_sg_ott)+sum(prop_missing_sg_app)+sum(prop_missing_sg_putt)))$sg_missing != 0){
+    # Perform multiple imputation
+    imputed_data <- suppressWarnings(mice(rounds, m = 5, method = "pmm", maxit = 5, seed = 1842, printFlag = F))
+    
+    # View completed dataset
+    rounds <- complete(imputed_data)
+  }
+  
+  ## ADD RESPONSE VARIABLE (WHETHER THE GOLFER MADE THE CUT OR NOT)
+  
+  finish <- dbGetQuery(conn, paste("
+                        SELECT
+                        	DFS_TOTAL.ID_EVENT,
+                        	DFS_TOTAL.DG_ID,
+                        	DFS_TOTAL.FIN_TEXT,
+                        	EVENT.CALENDAR_YEAR
+                        FROM
+                        	DFS_TOTAL
+                        	INNER JOIN EVENT ON EVENT.ID_EVENT = DFS_TOTAL.ID_EVENT
+                        WHERE
+                        	DFS_TOTAL.ID_EVENT IN (
+                        		SELECT
+                        			ID_EVENT
+                        		FROM
+                        			EVENT
+                        		WHERE
+                        			ID_EVENT IN ", get_sql_list(unique(rounds$id_event)),"
+                        	)  
+                        ", sep = ''))
+  
+  #add made_cut column
+  finish_with_cut <- finish %>% 
+    filter(!fin_text %in% c('W/D', ' W/D', 'WD', 'DQ', 'MDF', ' WD')) %>% 
+    mutate(made_cut = ifelse(!fin_text %in% c('CUT', ' CUT'), 1, 0))
+  
+  #add in whether made cut
+  rounds <- rounds %>% 
+    left_join(finish_with_cut %>% 
+                select(dg_id, calendar_year, id_event, fin_text), by = c('calendar_year', 'dg_id', 'id_event'), relationship = 'many-to-one')
+  
+  #filter out withdraws, dq's, etc
+  rounds <- rounds %>% 
+    filter(!fin_text %in% c('W/D', ' W/D', 'WD', 'DQ', 'MDF', ' WD'))
+  
+  #filter to rounds 1 and 2
+  rounds <- rounds %>% 
+    filter(round %in% c(1,2))
+  
+  #add made_cut flag
+  rounds <- rounds %>% 
+    mutate(made_cut = ifelse(!fin_text %in% c('CUT', ' CUT'), 1, 0)) %>% 
+    select(-fin_text) %>% 
+    mutate(round = factor(round))
+  
+  ## SPLIT INTO TRAINING VALIDATION AND TEST SET
+  
+  train <- rounds %>% filter(! calendar_year %in% c(2024, 2025))
+  val <- rounds %>% filter(calendar_year == 2024)
+  test <- rounds %>% filter(calendar_year == 2025)
+  
+  ## GENERATE NULL AND MIXED MODEL
+  
+  mod_null <- glmer(made_cut ~ 1 + (1|calendar_year:dg_id), family = binomial, data = train)
+  mod <- glmer(made_cut ~ sg_putt + sg_ott + sg_app + (1|calendar_year:dg_id), family = binomial, data = train)
+  s <- summary(mod)
+  
+  ## LOG THE EFFECTS
+  
+  effects <- effects %>% rbind(data.frame(id_course = c$id_course,
+                                           course_name = c$course_name,
+                                           aic_null = AIC(mod_null), 
+                                           aic_mod = AIC(mod),
+                                           logit_sg_putt = s$coefficients[2,1],
+                                           logit_sg_ott = s$coefficients[3,1],
+                                           logit_sg_app = s$coefficients[4,1],
+                                           p_sg_putt = sg_putt <- s$coefficients[2,4],
+                                           p_sg_ott = sg_ott <- s$coefficients[3,4],
+                                           p_sg_app = sg_app <- s$coefficients[4,4],
+                                           randef_var = (as.data.frame(VarCorr(mod)))$vcov))
+}
+```
 
+```{r}
 
-
-
-
-
-
+```
 
 
 
