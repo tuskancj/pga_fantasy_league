@@ -76,7 +76,8 @@ This database is updated after each PGA contest.
 
 ```{r}
 df_hist <- fromJSON(paste('https://feeds.datagolf.com/historical-raw-data/event-list?file_format=json&key=', api_key, sep = '')) %>% mutate(date = as.Date(date)) %>% clean_names()
-df_hist %>% filter(tour == 'pga', calendar_year == 2025) %>% arrange(desc(date))
+df_hist_current_year <- df_hist %>% filter(tour == 'pga', calendar_year == as.numeric(format(Sys.Date(), "%Y"))) %>% arrange(desc(date)) %>% mutate(row_number = row_number())
+df_hist_current_year
 ```
 
 # Glimpse of DFS Events Uploaded to AWS
@@ -84,7 +85,8 @@ df_hist %>% filter(tour == 'pga', calendar_year == 2025) %>% arrange(desc(date))
 The data from DataGolf.com should be pulled, processed, and uploaded to AWS on a weekly basis. Verify that the DFS events exist in AWS prior to manually uploading DFS league member picks.
 
 ```{r}
-dbGetQuery(conn, "select * from event where calendar_year = 2025") %>% arrange(desc(date))
+events_played_to_date <- dbGetQuery(conn, "select * from event where calendar_year = 2025") %>% arrange(desc(date)) %>% mutate(row_number = row_number())
+events_played_to_date
 ```
 
 # Glimpse Last DFS Board Uploaded
@@ -120,11 +122,24 @@ df <- dbGetQuery(conn, "
           ORDER BY
           	DATE DESC, TOTAL_PTS DESC
            ")
-df
-df %>% group_by(event_name, event_id, id_event, date) %>% summarize(entry_count = length(username)) %>% arrange(desc(date)) %>% head(1)
+# df
+last_event <- df %>% group_by(event_name, event_id, id_event, date) %>% summarize(entry_count = length(username), .groups = 'drop') %>% arrange(desc(date)) %>% head(1)
+last_event
 ```
 ```{r}
-print(paste('The last contest uploaded was Contest ', as.character(length(unique(df$event_id))), sep = ''))
+previous_contest <- length(unique(df$event_id))
+print(paste('The last contest uploaded was Contest ', as.character(previous_contest), ', event_id ', last_event$event_id ,sep = ''))
+```
+Potential contests to upload:
+
+```{r}
+# previous_event_row <- events_played_to_date %>% filter(event_id == last_event$event_id) %>% pull(row_number)-1
+# previous_event <- events_played_to_date %>% filter(row_number == previous_event_row)
+# print(paste('The next event has event_id of ', previous_event$event_id, ', ', previous_event$event_name, sep = ''))
+
+
+upcoming_events <- df_hist_current_year %>% filter(date >= last_event$date) %>% filter(event_id != last_event$event_id) %>% arrange(date)
+upcoming_events
 ```
 
 
@@ -133,9 +148,12 @@ print(paste('The last contest uploaded was Contest ', as.character(length(unique
 Manually input the year, DataGolf event id, and filename information:
 
 ```{r}
-year <- 2025
-event <- 33
-selected_file = '17_board.csv'
+year <- 2025 #for current year -> #as.numeric(format(Sys.Date(), "%Y"))
+event <- 60
+# selected_file <- '18_board.csv'
+selected_file <- paste(as.character(previous_contest+1), '_board.csv', sep = '')
+print(event)
+print(selected_file)
 
 #compile filepath - do not edit
 dir <- paste('../dfs_boards/', year, '/', sep = '')
@@ -257,7 +275,7 @@ The following script can be used to cross check golfers within the AWS database 
 
 sql <- "SELECT *
 FROM player
-WHERE player_name LIKE '%Davis%';"
+WHERE player_name LIKE '%Nico%';"
 
 dbGetQuery(conn, sql)
 
