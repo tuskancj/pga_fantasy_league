@@ -1,0 +1,190 @@
+cells:
+  - kind: 2
+    languageId: sql
+    value: "WITH\r
+
+      \    CTE1 AS ( --gets list of all golfer scores\r
+
+      \        SELECT\r
+
+      \            ACCOUNT.USERNAME AS USERNAME,\r
+
+      \            ACCOUNT.FIRST_NAME,\r
+
+      \            ACCOUNT.LAST_NAME,\r
+
+      \            EVENT.CALENDAR_YEAR,\r
+
+      \            EVENT.EVENT_NAME,\r
+
+      \            EVENT.DATE,\r
+
+      \            DFS.TOTAL_PTS\r
+
+      \        FROM\r
+
+      \            DFS_BOARD\r
+
+      \            INNER JOIN ACCOUNT ON ACCOUNT.ID_ACCOUNT =
+      DFS_BOARD.ID_ACCOUNT\r
+
+      \            INNER JOIN DFS_TOTAL AS DFS ON DFS.ID_DFS IN (\r
+
+      \                DFS_BOARD.ID_DFS_1,\r
+
+      \                DFS_BOARD.ID_DFS_2,\r
+
+      \                DFS_BOARD.ID_DFS_3,\r
+
+      \                DFS_BOARD.ID_DFS_4,\r
+
+      \                DFS_BOARD.ID_DFS_5,\r
+
+      \                DFS_BOARD.ID_DFS_6\r
+
+      \            )\r
+
+      \            INNER JOIN EVENT ON EVENT.ID_EVENT = DFS.ID_EVENT\r
+
+      \        WHERE\r
+
+      \            EVENT.CALENDAR_YEAR = 2025\r
+
+      \    ),\r
+
+      \    CTE2 AS ( --sums golfer scores for each event\r
+
+      \        SELECT\r
+
+      \            USERNAME,\r
+
+      \            FIRST_NAME,\r
+
+      \            LAST_NAME,\r
+
+      \            CALENDAR_YEAR,\r
+
+      \            EVENT_NAME,\r
+
+      \            DATE,\r
+
+      \            ROUND(SUM(TOTAL_PTS)::NUMERIC, 1) AS SUM_TOTAL_PTS\r
+
+      \        FROM\r
+
+      \            CTE1\r
+
+      \        GROUP BY\r
+
+      \            USERNAME,\r
+
+      \            FIRST_NAME,\r
+
+      \            LAST_NAME,\r
+
+      \            CALENDAR_YEAR,\r
+
+      \            EVENT_NAME,\r
+
+      \            DATE\r
+
+      \        ORDER BY\r
+
+      \            USERNAME,\r
+
+      \            SUM_TOTAL_PTS DESC\r
+
+      \    ),\r
+
+      \    CTE3 AS ( --calculates average, max, min scores for each event\r
+
+      \        SELECT \r
+
+      \            event_name, \r
+
+      \            date, \r
+
+      \            ROUND(AVG(sum_total_pts)::NUMERIC, 1) AS AVG_PTS,\r
+
+      \            MAX(sum_total_pts) AS MAX_PTS,\r
+
+      \            MIN(sum_total_pts) AS MIN_PTS\r
+
+      \        FROM CTE2\r
+
+      \        GROUP BY event_name, date\r
+
+      \    )\r
+
+      \r
+
+      \    SELECT\r
+
+      \    *\r
+
+      \    FROM\r
+
+      \    CTE3\r
+
+      \    ORDER BY\r
+
+      \    max_pts DESC;"
+    metadata: {}
+  - kind: 2
+    languageId: sql
+    value: "SELECT\r
+
+      \    ACCOUNT.USERNAME AS USERNAME,\r
+
+      \    ACCOUNT.FIRST_NAME,\r
+
+      \    ACCOUNT.LAST_NAME,\r
+
+      \    EVENT.CALENDAR_YEAR,\r
+
+      \    EVENT.EVENT_NAME,\r
+
+      \    EVENT.DATE,\r
+
+      \    DFS.TOTAL_PTS,\r
+
+      \    DFS.salary,\r
+
+      \    PLAYER.player_name\r
+
+      FROM\r
+
+      \    DFS_BOARD\r
+
+      INNER JOIN ACCOUNT ON ACCOUNT.ID_ACCOUNT = DFS_BOARD.ID_ACCOUNT\r
+
+      INNER JOIN DFS_TOTAL AS DFS ON DFS.ID_DFS IN (\r
+
+      \    DFS_BOARD.ID_DFS_1,\r
+
+      \    DFS_BOARD.ID_DFS_2,\r
+
+      \    DFS_BOARD.ID_DFS_3,\r
+
+      \    DFS_BOARD.ID_DFS_4,\r
+
+      \    DFS_BOARD.ID_DFS_5,\r
+
+      \    DFS_BOARD.ID_DFS_6\r
+
+      )\r
+
+      INNER JOIN EVENT ON EVENT.ID_EVENT = DFS.ID_EVENT\r
+
+      INNER JOIN player on DFS.dg_id = player.dg_id\r
+
+      where EXTRACT(YEAR FROM event.date) = 2025\r
+
+      limit 100;"
+    metadata: {}
+metadata:
+  conn:
+    id: YpYSJVulh5NJZczT6RjoJ
+    name: db-pga-fantasy
+  database: postgres
+  schema: public

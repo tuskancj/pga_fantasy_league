@@ -1,0 +1,16 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+#files
+*.csv
+*.xlsx
+*.json
+*.pdf
+*.docx
+*.html
+*.pyc
+
+#folders
+Newsletters/*

@@ -93,6 +93,7 @@ cat('predicted percentage of golfers making the cut (assuming 0.5 threshold):  '
 One of the leading sites for golf data has an F1 score of 0.61 for cut accuracy. The purpose of this study will be to produce similar results at a minimum.
 
 # Gather event information
+
 ```{r}
 events <- dbGetQuery(conn, "
                       SELECT
@@ -258,6 +259,7 @@ Training set will include years 2018 - 2023 (skipping 2020 due to Covid). This i
 
 ```{r}
 train <- rounds_sg_final %>% filter(! calendar_year %in% c(2017, 2024, 2025))
+# train <- rounds_sg_final %>% filter(! calendar_year %in% c(2024, 2025))
 val <- rounds_sg_final %>% filter(calendar_year == 2024)
 test <- rounds_sg_final %>% filter(calendar_year == 2025)
 ```
