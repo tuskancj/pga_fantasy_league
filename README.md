@@ -8,7 +8,9 @@ Web-scraping is against the Terms and Conditions of DFS websites (and many other
 
 # De-Identified League Dashboard
 
-[](https://buildmeupbuttercut.s3.us-east-1.amazonaws.com/dashboard-public.html)
+[Link to Dashboard](https://buildmeupbuttercut.s3.us-east-1.amazonaws.com/dashboard-public.html)
+
+[](Images/dashboard_sample.png)
 
 # Database Schema
 
