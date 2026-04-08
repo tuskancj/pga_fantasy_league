@@ -10,7 +10,7 @@ Web-scraping is against the Terms and Conditions of DFS websites (and many other
 
 [Link to Dashboard](https://buildmeupbuttercut.s3.us-east-1.amazonaws.com/dashboard-public.html)
 
-[](Images/dashboard_sample.png)
+![](Images/dashboard_sample.png)
 
 # Database Schema
 
@@ -25,7 +25,7 @@ Web-scraping is against the Terms and Conditions of DFS websites (and many other
 
 -   **dfs_api_lambda.py** - api that handles manual updating of dfs manager golfer picks (through local GUI) and league analytics dashboard
 
-[](Images/gui.png)
+![](Images/gui.png)
 
 ## lambda Folder
 
