@@ -22,3 +22,4 @@ api/lambda_api_package*
 dashboard/*
 lambda/lambda_package/*
 Models/*
+Images/*.png
