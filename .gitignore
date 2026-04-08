@@ -3,7 +3,7 @@
 .RData
 .Ruserdata
 
-#files
+#universal file types
 *.csv
 *.xlsx
 *.json
@@ -16,10 +16,14 @@
 *.dbcnb
 *.Rproj
 
+#specific files
+Images/pseudo_events_won.png
+Images/pseudo_ranking_trends.png
+Images/value_golfers_eg.png
+
 #folders
 Newsletters/*
 api/lambda_api_package*
 dashboard/*
 lambda/lambda_package/*
 Models/*
-Images/*.png

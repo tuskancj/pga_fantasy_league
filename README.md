@@ -6,36 +6,31 @@ As commissioner of a PGA Golf Daily Fantasy Sports (DFS) League, it is advantage
 
 Web-scraping is against the Terms and Conditions of DFS websites (and many other sports data websites), so a subscription was purchased from DataGolf.com which includes historical PGA course statistics and DFS statistics through partnerships. Data is accessed through an API which is great for limited information (e.g. last year's Masters results, upcoming event/course information, DFS salaries for a specific event, etc). However, the API would require tedious looped scripts for any potential predictive model building. Therefore, **the purpose of this repository is to develop a database of historical PGA golfer data as well as DFS data that is continuously updated on a weekly basis.** The database can then be queried for efficient analytics and predictive modeling.
 
-# Example Analytics and Diagrams
+# De-Identified League Dashboard
 
--   how are DFS league member rankings trending?
-
-![](Images/pseudo_ranking_trends.png)
-
--   which golfers are selected by the league most often/least often?
--   which golfers have provided the best value to the league? to the DFS league member? (i.e. low salary cost, high point total)
-
-![](Images/value_golfers_eg.png)
-
--   which golfers have provided the lowest value to the league? to the DFS league member? (i.e. high salary cost, low point total)
--   what are the total weekly earnings to date for each DFS league member?
-
-![](Images/pseudo_events_won.png)
-
--   which DFS league member has the best 'made-cut' percentage?
--   which DFS league member has missed the most contests? (forgot to set their lineup)
+[](https://buildmeupbuttercut.s3.us-east-1.amazonaws.com/dashboard-public.html)
 
 # Database Schema
 
 ![](Images/pga_db_schema.png)
 
-# Files & Folders
+# Script Descriptions
 
--   **datagolf_batch_processing.qmd** - Batch upload historical data to custom AWS Postgre SQL Relational Database
--   **lambda_builder.ipynb** - Build/maintain a Python script to extract, transform, and load new information to the AWS database (this will be added to a lambda script in AWS after feasibility testing)
--   **dfs_manual_upload.qmd** - Build/maintain an R script to manually upload PGA Daily Fantasy Sports (DFS) selections into the AWS database
--   **Newsletters** folder - Build/maintain R scripts that aggregate League Analytics and provide monthly league newsletters
--   **Models** folder - Build scripts to model or predict outcomes based on golf course features, historical golfer performance, etc.
+-   **datagolf_batch_processing.qmd** - Original batch upload script - historical data to custom AWS Postgre SQL Relational Database
+-   **dfs_manual_upload.qmd** - Quarto R script to manually upload PGA Daily Fantasy Sports (DFS) selections into the AWS database (see dfs_api_lambda.py for new cleaner GUI)
+
+## api folder
+
+-   **dfs_api_lambda.py** - api that handles manual updating of dfs manager golfer picks (through local GUI) and league analytics dashboard
+
+[](Images/gui.png)
+
+## lambda Folder
+
+-   **lambda_builder.ipynb** - Built Python notebook to manually extract, transform, and load new information to the AWS database 
+-   **lambda_function.py** - function that is zipped with libraries for AWS Lambda to automate weekly updates to the db
+
+
 
 
 
