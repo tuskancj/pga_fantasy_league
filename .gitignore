@@ -13,9 +13,12 @@
 *.pyc
 *.zip
 *.ps1
+*.dbcnb
+*.Rproj
 
 #folders
 Newsletters/*
 api/lambda_api_package*
 dashboard/*
 lambda/lambda_package/*
+Models/*
