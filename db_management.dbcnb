@@ -182,6 +182,64 @@ cells:
 
       limit 100;"
     metadata: {}
+  - kind: 2
+    languageId: sql
+    value: "select * from account\r\nlimit 10"
+    metadata: {}
+  - kind: 2
+    languageId: sql
+    value: "select * from dfs_board\r
+
+      inner join account on account.id_account = dfs_board.id_account\r
+
+      INNER JOIN DFS_TOTAL AS DFS ON DFS.ID_DFS IN (\r
+
+      \    DFS_BOARD.ID_DFS_1,\r
+
+      \    DFS_BOARD.ID_DFS_2,\r
+
+      \    DFS_BOARD.ID_DFS_3,\r
+
+      \    DFS_BOARD.ID_DFS_4,\r
+
+      \    DFS_BOARD.ID_DFS_5,\r
+
+      \    DFS_BOARD.ID_DFS_6\r
+
+      )\r
+
+      inner join event on event.id_event = dfs.id_event\r
+
+      where event.calendar_year = 2026 and event.event_name like '%American%'\r
+
+      order by event.date desc"
+    metadata: {}
+  - kind: 2
+    languageId: sql
+    value: "select player.player_name, event.event_name, event.id_event,
+      event.calendar_year, dfs_total.total_pts, event.dfs_payout from
+      dfs_total\r
+
+      inner join player on player.dg_id = dfs_total.dg_id\r
+
+      inner join event on event.id_event = dfs_total.id_event\r
+
+      where event.event_name like '%Arnold%' and event.calendar_year = 2026"
+    metadata: {}
+  - kind: 2
+    languageId: sql
+    value: select * from event where calendar_year = 2026
+    metadata: {}
+  - kind: 2
+    languageId: sql
+    value: "UPDATE event\r
+
+      SET dfs_payout = 23.21\r
+
+      WHERE event_id = 9\r
+
+      AND calendar_year = 2026;"
+    metadata: {}
 metadata:
   conn:
     id: YpYSJVulh5NJZczT6RjoJ

@@ -11,6 +11,11 @@
 *.docx
 *.html
 *.pyc
+*.zip
+*.ps1
 
 #folders
 Newsletters/*
+api/lambda_api_package*
+dashboard/*
+lambda/lambda_package/*
