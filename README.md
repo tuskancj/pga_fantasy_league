@@ -12,9 +12,11 @@ Web-scraping is against the Terms and Conditions of DFS websites (and many other
 
 ![](Images/dashboard_sample.png)
 
+![](Images/dashboard_ask_data.png)
+
 # Database Schema
 
-![](Images/pga_db_schema.png)
+![](Images/pga_db_schema_new_dark.png)
 
 # Script Descriptions
 
