@@ -440,149 +440,235 @@ def lambda_handler(event, context):
         if path == "/chat" and method == "POST":
             body     = json.loads(event.get("body", "{}"))
             messages = body.get("messages", [])
-            context  = body.get("context", {})  # year, standings summary etc from frontend
+            context  = body.get("context", {})
 
             if not messages:
                 return respond(400, {"error": "messages required"})
 
-            secret_name = os.environ.get("SECRET_NAME")
-            if not secret_name:
-                return respond(500, {"error": "SECRET_NAME not configured"})
-
-            secrets = get_secret(secret_name)
+            secrets = get_secret(os.environ.get("SECRET_NAME"))
             anthropic_key = secrets.get("anthropic_key")
             if not anthropic_key:
                 return respond(500, {"error": "anthropic_key not found in secret"})
 
-            def call_claude(system, msgs, max_tokens=1000):
-                payload = json.dumps({
-                    "model": "claude-sonnet-4-20250514",
-                    "max_tokens": max_tokens,
-                    "system": system,
-                    "messages": msgs
-                }).encode("utf-8")
-                req = urllib.request.Request(
-                    "https://api.anthropic.com/v1/messages",
-                    data=payload,
-                    headers={
-                        "Content-Type": "application/json",
-                        "x-api-key": anthropic_key,
-                        "anthropic-version": "2023-06-01"
-                    },
-                    method="POST"
-                )
-                with urllib.request.urlopen(req) as r:
-                    return json.loads(r.read().decode("utf-8"))
+            # Extract the latest user question
+            question = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
+            print(f"[chat] Question: {question}")
 
-            schema_prompt = """You are a data analyst assistant for a PGA FanDuel fantasy golf league.
+            # Step 1: Call pga-vanna Lambda to generate SQL
+            print(f"[chat] Calling pga-vanna...")
+            lambda_client = boto3.client("lambda", region_name="us-east-1", config=__import__("botocore").config.Config(read_timeout=110, connect_timeout=10))
+            vanna_response = lambda_client.invoke(
+                FunctionName="pga-vanna",
+                InvocationType="RequestResponse",
+                Payload=json.dumps({"httpMethod": "POST", "body": json.dumps({"question": question})})
+            )
+            vanna_payload = json.loads(vanna_response["Payload"].read())
+            vanna_body = json.loads(vanna_payload.get("body", "{}"))
+            sql_query = vanna_body.get("sql", "").strip()
+            print(f"[chat] pga-vanna returned SQL: {sql_query[:200]}")
 
-DATABASE SCHEMA (PostgreSQL):
-account(id_account UUID PK, first_name, last_name, username, active BOOLEAN)
-event(id_event UUID PK, calendar_year INT, event_id INT, date DATE, event_name, dfs_payout NUMERIC)
-player(dg_id INT PK, player_name, country, country_code, amateur INT)
-  - player_name format: "LastName, FirstName"
-dfs_total(id_dfs UUID PK, id_event UUID FK, dg_id INT FK, fin_text, total_pts FLOAT,
-  salary INT, hole_score_pts FLOAT, finish_pts INT, five_birdie_pts INT,
-  bogey_free_pts INT, bounce_back_pts FLOAT, streak_pts FLOAT)
-  - fin_text: finish position e.g. "T5", "1", "CUT", "WD"
-dfs_board(id_board UUID PK, id_account UUID FK, id_dfs_1..id_dfs_6 UUID FK -> dfs_total.id_dfs)
-  - each row = one manager's 6 golfer picks for one event
-  - ALWAYS unnest picks with: JOIN LATERAL (VALUES (db.id_dfs_1),(db.id_dfs_2),(db.id_dfs_3),(db.id_dfs_4),(db.id_dfs_5),(db.id_dfs_6)) AS picks(id_dfs) ON true
-  - Then JOIN dfs_total dt ON dt.id_dfs = picks.id_dfs
-  - NEVER join dfs_total 6 times or use IN (id_dfs_1,...,id_dfs_6) for pick unnesting
-course(id_course UUID PK, course_name, course_num INT, course_par INT)
-round(id_round UUID PK, id_event UUID FK, id_course UUID FK, dg_id INT FK,
-  round FLOAT, score INT, pars INT, birdies INT, bogies INT, doubles_or_worse INT,
-  eagles_or_better INT, sg_total FLOAT, sg_t2g FLOAT, sg_putt FLOAT,
-  sg_ott FLOAT, sg_arg FLOAT, sg_app FLOAT, scrambling FLOAT,
-  driving_dist FLOAT, driving_acc FLOAT, gir FLOAT)
-
-Current context: """ + json.dumps(context)
-
-            sql_system = schema_prompt + """
-
-TASK: Translate the user's question into a single PostgreSQL SELECT query.
-
-RULES:
-- Output ONLY the SQL query. No markdown, no backticks, no explanation.
-- ALWAYS query the database first. Every question about managers, golfers, picks, events, scores, or performance CAN be answered from this schema.
-- Only respond with CANNOT_QUERY if the question is completely unrelated to golf/DFS (e.g. "what's the weather")
-- LIMIT results to 100 rows maximum
-- Round numeric results to 1-2 decimal places
-- For pick-related questions about a specific manager: filter by account.username
-- player_name is "LastName, FirstName" — use SPLIT_PART or CONCAT to reformat for display
-- fin_text 'WD' or 'CUT' = did not complete tournament
-- active managers only: JOIN account WHERE account.active = true"""
-
-            # Step 1: Generate SQL
-            sql_response = call_claude(sql_system, messages, max_tokens=700)
-            sql_query = sql_response["content"][0]["text"].strip()
-
-            if sql_query == "CANNOT_QUERY" or sql_query.upper().startswith("CANNOT"):
-                answer_system = schema_prompt + """
-Answer the user's question using your general PGA/golf/FanDuel knowledge.
-Be concise. NEVER mention SQL, databases, or ask the user to do anything technical.
-If they want a chart respond with:
-CHART_JSON:{"type":"bar|line|scatter","title":"...","labels":[...],"datasets":[{"label":"...","data":[...],"color":"#hex"}]}"""
-                answer_response = call_claude(answer_system, messages)
+            if not sql_query or "error" in vanna_body:
                 return respond(200, {
-                    "content": answer_response["content"],
+                    "content": [{"type": "text", "text": "I'm having trouble with that question. Could you try rephrasing it or be more specific?"}],
                     "sql": None,
-                    "results": None
+                    "results_count": 0
                 })
 
-            # Step 2: Execute SQL — auto-retry once with Claude fixing the query
+            # Step 2: Execute SQL
             results = []
-            for attempt in range(2):
-                try:
-                    sql_cur = conn.cursor()
-                    sql_cur.execute(sql_query)
-                    col_names = [desc[0] for desc in sql_cur.description]
-                    rows = sql_cur.fetchall()
-                    results = [dict(zip(col_names, row)) for row in rows]
-                    sql_cur.close()
-                    break
-                except Exception as sql_err:
-                    try: sql_cur.close()
-                    except: pass
-                    conn.rollback()
-                    if attempt == 0:
-                        fix_system = schema_prompt + f"""
-The following SQL failed: {sql_query}
-Error: {str(sql_err)}
+            col_names = []
+            sql_failed = False
+            try:
+                sql_cur = conn.cursor()
+                sql_cur.execute(sql_query)
+                col_names = [desc[0] for desc in sql_cur.description]
+                rows = sql_cur.fetchall()
+                results = [dict(zip(col_names, row)) for row in rows]
+                sql_cur.close()
+            except Exception as sql_err:
+                try: sql_cur.close()
+                except: pass
+                conn.rollback()
+                sql_failed = True
+                sql_query = f"SQL_ERROR: {str(sql_err)}"
 
-Write a corrected SQL query. Output ONLY the SQL — no markdown, no explanation.
-Key reminder: for dfs_board picks ALWAYS use LATERAL VALUES to unnest, never join each id_dfs_N separately."""
-                        fix_response = call_claude(fix_system, messages, max_tokens=700)
-                        sql_query = fix_response["content"][0]["text"].strip()
-                    else:
-                        sql_query = f"SQL_ERROR: {str(sql_err)}"
-                        results = []
+            # Log every query to training_log as unapproved for review
+            try:
+                log_cur = conn.cursor()
+                log_cur.execute(
+                    "INSERT INTO training_log (question, sql_query, approved) VALUES (%s, %s, false)",
+                    (question, sql_query)
+                )
+                conn.commit()
+                log_cur.close()
+            except Exception:
+                conn.rollback()
 
-            # Step 3: Interpret and respond naturally — user never sees SQL
+            if sql_failed:
+                return respond(200, {
+                    "content": [{"type": "text", "text": "I'm having trouble with that question. Could you try rephrasing it or be more specific?"}],
+                    "sql": sql_query,
+                    "results_count": 0
+                })
+
+            # Step 3: Claude interprets results using question context and specifies the chart
             results_str = json.dumps(results[:75], cls=CustomEncoder)
-            interpret_system = schema_prompt + f"""
+            col_summary = ', '.join(col_names) if col_names else ''
 
-You just looked up data from the database to answer the user's question.
-Here are the results ({len(results)} rows total, showing up to 75):
+            interpret_system = f"""You are a data analyst for a PGA FanDuel fantasy golf league.
+
+The user asked: "{question}"
+
+SQL result columns: {col_summary}
+Results ({len(results)} rows):
 {results_str}
 
-Respond naturally and conversationally — as if you just looked this up yourself.
-NEVER mention SQL, databases, queries, or ask the user to do anything technical.
-NEVER say you "ran a query" or "checked the database".
-Just answer the question directly with the data.
+Your job:
+1. Write 1-2 sentences of insight in plain conversational English
+2. If there are more than 2 rows, specify a chart using CHART_SPEC on its own line
 
-If results are empty, say you couldn't find that information and suggest rephrasing.
-If they want a chart, respond with (text explanation first, then on its own line):
-CHART_JSON:{{"type":"bar|line|scatter","title":"...","labels":[...],"datasets":[{{"label":"...","data":[...],"color":"#hex"}}]}}"""
+CHART_SPEC format:
+CHART_SPEC:{{"label_col":"<column for x-axis>","value_col":"<column for bar/line values>","type":"bar|line","title":"<chart title>"}}
 
-            answer_response = call_claude(interpret_system, messages)
+Column selection rules:
+- For year-over-year queries: label_col = calendar_year
+- For manager comparisons: label_col = username
+- For golfer comparisons: label_col = golfer (or player_name)
+- For scoring questions: value_col = total_pts or avg_pts
+- For value/ratio questions: value_col = value_ratio
+- For pick counts: value_col = times_picked or times_selected
+- For missed events: value_col = missed_events
+- For wins: value_col = wins
+- Never use calendar_year, event_id, or dg_id as value_col
+
+NEVER use markdown, tables, code blocks or backticks.
+NEVER mention SQL or databases."""
+
+            payload = json.dumps({
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 400,
+                "system": interpret_system,
+                "messages": messages
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                "https://api.anthropic.com/v1/messages",
+                data=payload,
+                headers={"Content-Type": "application/json", "x-api-key": anthropic_key, "anthropic-version": "2023-06-01"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req) as r:
+                answer_response = json.loads(r.read().decode("utf-8"))
+
+            raw = answer_response["content"][0]["text"].strip()
+
+            # Parse CHART_SPEC and build chart directly from results — Lambda does the math
+            chart_json = None
+            insight_text = raw
+            if "CHART_SPEC:" in raw:
+                parts = raw.split("CHART_SPEC:")
+                insight_text = parts[0].strip()
+                try:
+                    spec = json.loads(parts[1].strip())
+                    label_col = spec.get("label_col")
+                    value_col = spec.get("value_col")
+                    chart_type = spec.get("type", "bar")
+                    chart_title = spec.get("title", question[:60])
+                    if label_col in col_names and value_col in col_names:
+                        chart_json = {
+                            "type": chart_type,
+                            "title": chart_title,
+                            "labels": [str(r.get(label_col, '')) for r in results[:50]],
+                            "datasets": [{
+                                "label": value_col.replace('_', ' ').title(),
+                                "data": [float(r.get(value_col, 0) or 0) for r in results[:50]],
+                                "color": "#1D9E75"
+                            }]
+                        }
+                except Exception:
+                    pass
+
+            full_response = f"{insight_text}\nCHART_JSON:{json.dumps(chart_json)}" if chart_json else insight_text
 
             return respond(200, {
-                "content": answer_response["content"],
+                "content": [{"type": "text", "text": full_response}],
                 "sql": sql_query,
                 "results_count": len(results)
             })
+
+        # GET /upcoming-event
+        if path == "/upcoming-event" and method == "GET":
+            secret_name = os.environ.get("SECRET_NAME")
+            secrets = get_secret(secret_name)
+            api_key = secrets.get("api_key")
+
+            # Fetch field and salary data in parallel
+            req_field = urllib.request.Request(
+                f"https://feeds.datagolf.com/field-updates?tour=pga&file_format=json&key={api_key}",
+                headers={"Content-Type": "application/json"},
+                method="GET"
+            )
+            with urllib.request.urlopen(req_field, timeout=15) as r:
+                field_data = json.loads(r.read().decode("utf-8"))
+
+            # Fetch current FanDuel salaries
+            salary_map = {}
+            try:
+                req_salary = urllib.request.Request(
+                    f"https://feeds.datagolf.com/preds/fantasy-projection-defaults?tour=pga&site=fanduel&slate=main&file_format=json&key={api_key}",
+                    headers={"Content-Type": "application/json"},
+                    method="GET"
+                )
+                with urllib.request.urlopen(req_salary, timeout=15) as r:
+                    salary_data = json.loads(r.read().decode("utf-8"))
+                for p in salary_data.get("projections", []):
+                    if p.get("dg_id") and p.get("salary"):
+                        salary_map[p["dg_id"]] = int(p["salary"])
+            except Exception:
+                pass
+
+            # Get dg_ids of players in the field
+            field = field_data.get("field", [])
+            dg_ids = [p["dg_id"] for p in field if p.get("dg_id")]
+            event_name = field_data.get("event_name", "")
+
+            # Query historical value at this event for players in the current field
+            value_picks = []
+            if dg_ids and event_name:
+                cur.execute("""
+                    SELECT
+                        p.player_name,
+                        p.dg_id,
+                        COUNT(*) AS appearances,
+                        ROUND(AVG(dt.total_pts)::numeric, 1) AS avg_pts,
+                        ROUND(AVG(dt.salary)::numeric, 0) AS avg_salary,
+                        ROUND((AVG(dt.total_pts) / NULLIF(AVG(dt.salary), 0) * 1000)::numeric, 2) AS value_ratio,
+                        ROUND(MAX(dt.total_pts)::numeric, 1) AS best_pts
+                    FROM dfs_total dt
+                    JOIN player p ON p.dg_id = dt.dg_id
+                    JOIN event e ON e.id_event = dt.id_event
+                    WHERE dt.dg_id = ANY(%(dg_ids)s)
+                    AND e.event_name ILIKE %(event_pattern)s
+                    AND dt.salary > 0
+                    AND dt.fin_text NOT IN ('WD', 'CUT')
+                    GROUP BY p.player_name, p.dg_id
+                    HAVING COUNT(*) >= 1
+                    ORDER BY value_ratio DESC
+                    LIMIT 50
+                """, {"dg_ids": dg_ids, "event_pattern": f"%{event_name.split(' ')[0]}%"})
+                rows = cur.fetchall()
+                # Merge current salary from DataGolf
+                value_picks = []
+                for row in rows:
+                    pick = dict(row) if hasattr(row, 'keys') else {
+                        "player_name": row[0], "dg_id": row[1],
+                        "appearances": row[2], "avg_pts": row[3],
+                        "avg_salary": row[4], "value_ratio": row[5], "best_pts": row[6]
+                    }
+                    pick["current_salary"] = salary_map.get(pick["dg_id"])
+                    value_picks.append(pick)
+
+            field_data["value_picks"] = value_picks
+            return respond(200, field_data)
 
         return respond(404, {"error": f"Unknown path: {path}"})
 
