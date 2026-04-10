@@ -12,6 +12,19 @@ Web-scraping is against the Terms and Conditions of DFS websites (and many other
 
 ![](Images/dashboard_sample.png)
 
+## AI-Powered Chat Analytics
+
+The dashboard includes a natural language query interface backed by a two-stage AI pipeline:
+
+**SQL Generation — Vanna + Claude Sonnet**
+User questions are routed to a dedicated `pga-vanna` Lambda running [Vanna AI](https://vanna.ai) with ChromaDB as the vector store and Claude Sonnet as the LLM backend. Vanna uses retrieval-augmented generation (RAG) to match the user's question against verified training examples before generating PostgreSQL queries, ensuring accurate joins and schema-aware SQL.
+
+**Interpretation — Claude Sonnet**
+Query results are passed to a second Claude Sonnet call which interprets the data, writes a natural language insight, and specifies the appropriate chart type and columns. The Lambda builds the chart directly from raw SQL results — no LLM touches the numeric values — eliminating hallucination in chart data.
+
+**Continuous Training**
+Every query is automatically logged to a `training_log` table in RDS with `approved = false`. Reviewed and validated queries can be promoted to `approved = true`, after which they are dynamically loaded into Vanna's ChromaDB vector store on the next cold start — no redeployment required.
+
 ![](Images/dashboard_ask_data.png)
 
 # Database Schema
