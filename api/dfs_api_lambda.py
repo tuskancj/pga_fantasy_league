@@ -223,7 +223,7 @@ def lambda_handler(event, context):
         if path == "/dashboard" and method == "GET":
             year = int(params.get("year", datetime.now().year))
 
-            # 1. Standings — total points per manager for the season
+            # 1. Standings - total points per manager for the season
             cur.execute("""
                 SELECT
                     a.username,
@@ -242,7 +242,7 @@ def lambda_handler(event, context):
             """, {"year": year})
             standings = cur.fetchall()
 
-            # 2. Pick frequency — how many times each golfer was selected
+            # 2. Pick frequency - how many times each golfer was selected
             cur.execute("""
                 SELECT
                     p.player_name,
@@ -261,7 +261,7 @@ def lambda_handler(event, context):
             """, {"year": year})
             pick_frequency = cur.fetchall()
 
-            # 3. Salary vs points — aggregate per golfer across all events
+            # 3. Salary vs points - aggregate per golfer across all events
             cur.execute("""
                 SELECT
                     p.player_name,
@@ -280,7 +280,7 @@ def lambda_handler(event, context):
             """, {"year": year})
             salary_vs_pts = cur.fetchall()
 
-            # 4. Trending managers — last 3 events, points per event
+            # 4. Trending managers - last 3 events, points per event
             cur.execute("""
                 SELECT
                     a.username,
@@ -313,7 +313,7 @@ def lambda_handler(event, context):
             """, {"year": year})
             trending_managers = cur.fetchall()
 
-            # 5. Trending golfers — last 3 events FanDuel scoring
+            # 5. Trending golfers - last 3 events FanDuel scoring
             cur.execute("""
                 SELECT
                     p.player_name,
@@ -362,7 +362,7 @@ def lambda_handler(event, context):
             """, {"year": year})
             manager_event_scores = cur.fetchall()
 
-            # 7. Winner earnings — top scorer per event gets the payout
+            # 7. Winner earnings - top scorer per event gets the payout
             cur.execute("""
                 WITH event_scores AS (
                     SELECT
@@ -395,7 +395,7 @@ def lambda_handler(event, context):
             """, {"year": year})
             winner_earnings = cur.fetchall()
 
-            # 7b. No comment — just needed for stat card
+            # 7b. No comment - just needed for stat card
             cur.execute("""
                 WITH event_scores AS (
                     SELECT
@@ -421,7 +421,7 @@ def lambda_handler(event, context):
             """, {"year": year})
             top_earner = cur.fetchone()
 
-            # 7. Multi-year golfer history for chat — no longer sent in payload
+            # 7. Multi-year golfer history for chat - no longer sent in payload
             # Chat now uses SQL generation to query directly
 
             return respond(200, {
@@ -436,54 +436,100 @@ def lambda_handler(event, context):
                 "top_earner": top_earner
             })
 
-        # POST /chat
+        # POST /chat - Mistral Large via Bedrock
         if path == "/chat" and method == "POST":
-            body     = json.loads(event.get("body", "{}"))
+            body = json.loads(event.get("body", "{}"))
             messages = body.get("messages", [])
-            context  = body.get("context", {})
+            model_id = body.get("model_id", "mistral.mistral-large-2402-v1:0")
 
             if not messages:
                 return respond(400, {"error": "messages required"})
 
-            secrets = get_secret(os.environ.get("SECRET_NAME"))
-            anthropic_key = secrets.get("anthropic_key")
-            if not anthropic_key:
-                return respond(500, {"error": "anthropic_key not found in secret"})
-
-            # Extract the latest user question
             question = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
-            print(f"[chat] Question: {question}")
 
-            # Step 1: Call pga-vanna Lambda to generate SQL
-            print(f"[chat] Calling pga-vanna...")
-            lambda_client = boto3.client("lambda", region_name="us-east-1", config=__import__("botocore").config.Config(read_timeout=110, connect_timeout=10))
-            vanna_response = lambda_client.invoke(
-                FunctionName="pga-vanna",
-                InvocationType="RequestResponse",
-                Payload=json.dumps({"httpMethod": "POST", "body": json.dumps({"question": question})})
+            prior = [m for m in messages[:-1] if m["role"] == "user"]
+            new_subject_signals = ['performance', 'history', 'show', 'who', 'what', 'how', 'give', 'list', 'compare', 'pick', 'win', 'miss', 'score', 'salary']
+            is_followup = (
+                len(question.split()) <= 3 and
+                not any(sig in question.lower() for sig in new_subject_signals)
             )
-            vanna_payload = json.loads(vanna_response["Payload"].read())
-            vanna_body = json.loads(vanna_payload.get("body", "{}"))
-            sql_query = vanna_body.get("sql", "").strip()
-            print(f"[chat] pga-vanna returned SQL: {sql_query[:200]}")
+            contextual_question = f"{prior[-1]['content']} - specifically {question}" if (is_followup and prior) else question
 
-            if not sql_query or "error" in vanna_body:
-                return respond(200, {
-                    "content": [{"type": "text", "text": "I'm having trouble with that question. Could you try rephrasing it or be more specific?"}],
-                    "sql": None,
-                    "results_count": 0
-                })
+            history_str = ""
+            for m in messages[:-1][-6:]:
+                role = "User" if m["role"] == "user" else "Assistant"
+                history_str += f"{role}: {m['content'][:200]}\n"
 
-            # Step 2: Execute SQL
-            results = []
-            col_names = []
-            sql_failed = False
+            print(f"[chat] Question: {contextual_question}")
+
+            secrets = get_secret(os.environ.get("SECRET_NAME"))
+            current_year = __import__("datetime").datetime.now().year
+
+            examples = """Q: What are cjt3's most picked golfers?
+SELECT SPLIT_PART(p.player_name,', ',2)||\' \'||SPLIT_PART(p.player_name,', ',1) AS golfer, COUNT(*) AS times_picked FROM dfs_board db JOIN account a ON db.id_account=a.id_account JOIN LATERAL (VALUES (db.id_dfs_1),(db.id_dfs_2),(db.id_dfs_3),(db.id_dfs_4),(db.id_dfs_5),(db.id_dfs_6)) AS picks(id_dfs) ON true JOIN dfs_total dt ON dt.id_dfs=picks.id_dfs JOIN player p ON p.dg_id=dt.dg_id WHERE a.username='cjt3' GROUP BY p.player_name ORDER BY times_picked DESC LIMIT 20;
+
+Q: Who won the most events in 2026?
+WITH scores AS (SELECT a.username, e.id_event, SUM(dt.total_pts) AS pts FROM dfs_board db JOIN account a ON db.id_account=a.id_account JOIN LATERAL (VALUES (db.id_dfs_1),(db.id_dfs_2),(db.id_dfs_3),(db.id_dfs_4),(db.id_dfs_5),(db.id_dfs_6)) AS picks(id_dfs) ON true JOIN dfs_total dt ON dt.id_dfs=picks.id_dfs JOIN event e ON e.id_event=dt.id_event WHERE e.calendar_year=2026 GROUP BY a.username,e.id_event), ranked AS (SELECT *, RANK() OVER (PARTITION BY id_event ORDER BY pts DESC) AS rnk FROM scores) SELECT username, COUNT(*) AS wins FROM ranked WHERE rnk=1 GROUP BY username ORDER BY wins DESC;
+
+Q: What are the current season standings?
+SELECT a.username, ROUND(SUM(dt.total_pts)::numeric,1) AS total_pts, COUNT(DISTINCT e.id_event) AS events FROM dfs_board db JOIN account a ON db.id_account=a.id_account JOIN LATERAL (VALUES (db.id_dfs_1),(db.id_dfs_2),(db.id_dfs_3),(db.id_dfs_4),(db.id_dfs_5),(db.id_dfs_6)) AS picks(id_dfs) ON true JOIN dfs_total dt ON dt.id_dfs=picks.id_dfs JOIN event e ON e.id_event=dt.id_event WHERE e.calendar_year=2026 AND a.active=true GROUP BY a.username ORDER BY total_pts DESC;
+
+Q: Who has missed the most events?
+WITH cte1 AS (SELECT a.username, e.event_name, e.calendar_year, SUM(dt.total_pts) AS dfs_count FROM dfs_board db JOIN account a ON db.id_account=a.id_account JOIN LATERAL (VALUES (db.id_dfs_1),(db.id_dfs_2),(db.id_dfs_3),(db.id_dfs_4),(db.id_dfs_5),(db.id_dfs_6)) AS picks(id_dfs) ON true JOIN dfs_total dt ON dt.id_dfs=picks.id_dfs JOIN event e ON e.id_event=dt.id_event WHERE e.calendar_year=2026 GROUP BY e.calendar_year,e.event_name,a.username), cte2 AS (SELECT username, COUNT(DISTINCT event_name) AS unique_dfs FROM cte1 GROUP BY username), cte3 AS (SELECT COUNT(DISTINCT event_name) AS unique_events FROM cte1) SELECT username, unique_events-unique_dfs AS missed_events FROM cte2 CROSS JOIN cte3 ORDER BY missed_events DESC;"""
+
+            try:
+                tl_cur = conn.cursor()
+                tl_cur.execute("SELECT question, sql_query FROM training_log WHERE approved = true ORDER BY created_at ASC LIMIT 30")
+                for q, s in tl_cur.fetchall():
+                    examples += f"\n\nQ: {q}\n{s}"
+                tl_cur.close()
+            except Exception:
+                conn.rollback()
+
+            sql_prompt = f"""You are a PostgreSQL SQL expert for a PGA FanDuel fantasy golf league.
+
+SCHEMA:
+account(id_account UUID PK, username, active BOOLEAN)
+event(id_event UUID PK, calendar_year INT, event_id INT, date DATE, event_name TEXT, dfs_payout NUMERIC)
+player(dg_id INT PK, player_name TEXT) -- player_name: LastName, FirstName
+dfs_total(id_dfs UUID PK, id_event UUID FK, dg_id INT FK, fin_text TEXT, total_pts FLOAT, salary INT, hole_score_pts FLOAT, finish_pts INT, five_birdie_pts INT, bogey_free_pts INT, bounce_back_pts FLOAT, streak_pts FLOAT)
+dfs_board(id_board UUID PK, id_account UUID FK, id_dfs_1..id_dfs_6 UUID FK -> dfs_total.id_dfs)
+round(id_round UUID PK, id_event UUID FK, id_course UUID FK, dg_id INT FK, round FLOAT, score INT, sg_total FLOAT, sg_putt FLOAT, sg_ott FLOAT, sg_arg FLOAT, sg_app FLOAT)
+model_run(id_run UUID PK, id_event UUID FK, model_version TEXT, run_timestamp TIMESTAMPTZ, config JSONB)
+prediction_golfer(id_run UUID FK, dg_id INT FK, salary INT, sim_mean NUMERIC, sim_sd NUMERIC, sim_p_low NUMERIC, sim_p_high NUMERIC, made_cut_pct NUMERIC, dg_proj NUMERIC)
+prediction_lineup(id_lineup UUID PK, id_run UUID FK, tier TEXT, predicted_total NUMERIC, dg_proj_total NUMERIC, salary_total INT)
+prediction_lineup_pick(id_lineup UUID FK, dg_id INT FK)
+
+CRITICAL: For dfs_board picks ALWAYS use LATERAL VALUES:
+JOIN LATERAL (VALUES (db.id_dfs_1),(db.id_dfs_2),(db.id_dfs_3),(db.id_dfs_4),(db.id_dfs_5),(db.id_dfs_6)) AS picks(id_dfs) ON true
+JOIN dfs_total dt ON dt.id_dfs = picks.id_dfs
+
+RULES: Output ONLY raw SQL. LIMIT 100 rows. Display names: SPLIT_PART(player_name,', ',2)||\' \'||SPLIT_PART(player_name,', ',1). Active managers: WHERE account.active = true.
+
+EXAMPLES:
+{{examples}}
+
+{{"Prior conversation:" + chr(10) + history_str if history_str else ""}}
+Write SQL for: {{contextual_question}}"""
+
+            sql_prompt = sql_prompt.replace("{examples}", examples).replace("{contextual_question}", contextual_question)
+
+            bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
+            sql_response = bedrock.invoke_model(
+                modelId=model_id,
+                body=json.dumps({"prompt": f"<s>[INST]{sql_prompt}[/INST]", "max_tokens": 1000, "temperature": 0.1}),
+                contentType="application/json", accept="application/json"
+            )
+            sql_query = json.loads(sql_response["body"].read()).get("outputs", [{}])[0].get("text", "").strip()
+            sql_query = sql_query.replace("```sql", "").replace("```", "").strip()
+            print(f"[chat] SQL: {sql_query[:200]}")
+
+            results, col_names, sql_failed = [], [], False
             try:
                 sql_cur = conn.cursor()
                 sql_cur.execute(sql_query)
                 col_names = [desc[0] for desc in sql_cur.description]
-                rows = sql_cur.fetchall()
-                results = [dict(zip(col_names, row)) for row in rows]
+                results = [dict(zip(col_names, row)) for row in sql_cur.fetchall()]
                 sql_cur.close()
             except Exception as sql_err:
                 try: sql_cur.close()
@@ -492,109 +538,121 @@ def lambda_handler(event, context):
                 sql_failed = True
                 sql_query = f"SQL_ERROR: {str(sql_err)}"
 
-            # Log every query to training_log as unapproved for review
             try:
                 log_cur = conn.cursor()
-                log_cur.execute(
-                    "INSERT INTO training_log (question, sql_query, approved) VALUES (%s, %s, false)",
-                    (question, sql_query)
-                )
+                log_cur.execute("INSERT INTO training_log (question, sql_query, approved, source) VALUES (%s, %s, false, %s)", (question, sql_query, "mistral"))
                 conn.commit()
                 log_cur.close()
             except Exception:
                 conn.rollback()
 
             if sql_failed:
-                return respond(200, {
-                    "content": [{"type": "text", "text": "I'm having trouble with that question. Could you try rephrasing it or be more specific?"}],
-                    "sql": sql_query,
-                    "results_count": 0
-                })
+                return respond(200, {"content": [{"type": "text", "text": "I had trouble with that question. Could you try rephrasing it?"}], "sql": sql_query, "results_count": 0})
 
-            # Step 3: Claude interprets results using question context and specifies the chart
             results_str = json.dumps(results[:75], cls=CustomEncoder)
-            col_summary = ', '.join(col_names) if col_names else ''
+            col_summary = ", ".join(col_names) if col_names else ""
 
-            interpret_system = f"""You are a data analyst for a PGA FanDuel fantasy golf league.
+            interpret_prompt = f"""You are a data analyst for a PGA FanDuel fantasy golf league. Current year: {current_year}.
 
-The user asked: "{question}"
+{{"Prior conversation:" + chr(10) + history_str if history_str else ""}}
+The user asked: "{contextual_question}"
 
-SQL result columns: {col_summary}
+Result columns: {col_summary}
 Results ({len(results)} rows):
 {results_str}
 
-Your job:
-1. Write 1-2 sentences of insight in plain conversational English
-2. If there are more than 2 rows, specify a chart using CHART_SPEC on its own line
+AMBIGUITY: If multiple distinct players match a name in the question, ONLY ask for clarification and stop.
+PREDICTIONS: If asked about future events, acknowledge and analyze historical data instead.
+RULES: Write 2-3 sentences of insight. If no ambiguity and more than 2 rows add:
+CHART_SPEC:{{"label_col":"<col>","value_col":"<col>","type":"bar|line","title":"<title>"}}
+Never mention SQL, markdown, or chart types in text."""
 
-CHART_SPEC format:
-CHART_SPEC:{{"label_col":"<column for x-axis>","value_col":"<column for bar/line values>","type":"bar|line","title":"<chart title>"}}
-
-Column selection rules:
-- For year-over-year queries: label_col = calendar_year
-- For manager comparisons: label_col = username
-- For golfer comparisons: label_col = golfer (or player_name)
-- For scoring questions: value_col = total_pts or avg_pts
-- For value/ratio questions: value_col = value_ratio
-- For pick counts: value_col = times_picked or times_selected
-- For missed events: value_col = missed_events
-- For wins: value_col = wins
-- Never use calendar_year, event_id, or dg_id as value_col
-
-NEVER use markdown, tables, code blocks or backticks.
-NEVER mention SQL or databases."""
-
-            payload = json.dumps({
-                "model": "claude-sonnet-4-20250514",
-                "max_tokens": 400,
-                "system": interpret_system,
-                "messages": messages
-            }).encode("utf-8")
-            req = urllib.request.Request(
-                "https://api.anthropic.com/v1/messages",
-                data=payload,
-                headers={"Content-Type": "application/json", "x-api-key": anthropic_key, "anthropic-version": "2023-06-01"},
-                method="POST"
+            interpret_response = bedrock.invoke_model(
+                modelId=model_id,
+                body=json.dumps({"prompt": f"<s>[INST]{interpret_prompt}[/INST]", "max_tokens": 400, "temperature": 0.3}),
+                contentType="application/json", accept="application/json"
             )
-            with urllib.request.urlopen(req) as r:
-                answer_response = json.loads(r.read().decode("utf-8"))
+            raw = json.loads(interpret_response["body"].read()).get("outputs", [{}])[0].get("text", "").strip()
+            print(f"[chat] Interpret: {raw[:200]}")
 
-            raw = answer_response["content"][0]["text"].strip()
-
-            # Parse CHART_SPEC and build chart directly from results — Lambda does the math
-            chart_json = None
-            insight_text = raw
+            chart_json, insight_text = None, raw
             if "CHART_SPEC:" in raw:
-                parts = raw.split("CHART_SPEC:")
+                parts = raw.split("CHART_SPEC:", 1)
                 insight_text = parts[0].strip()
+                spec_raw = parts[1].strip().replace("```json","").replace("```","").strip()
                 try:
-                    spec = json.loads(parts[1].strip())
-                    label_col = spec.get("label_col")
-                    value_col = spec.get("value_col")
-                    chart_type = spec.get("type", "bar")
-                    chart_title = spec.get("title", question[:60])
-                    if label_col in col_names and value_col in col_names:
-                        chart_json = {
-                            "type": chart_type,
-                            "title": chart_title,
-                            "labels": [str(r.get(label_col, '')) for r in results[:50]],
-                            "datasets": [{
-                                "label": value_col.replace('_', ' ').title(),
-                                "data": [float(r.get(value_col, 0) or 0) for r in results[:50]],
-                                "color": "#1D9E75"
-                            }]
-                        }
-                except Exception:
-                    pass
+                    spec = json.loads(spec_raw[:spec_raw.index("}")+1])
+                    lc, vc = spec.get("label_col"), spec.get("value_col")
+                    if lc in col_names and vc in col_names:
+                        chart_json = {"type": spec.get("type","bar"), "title": spec.get("title", question[:60]),
+                            "labels": [str(r.get(lc,"")) for r in results[:50]],
+                            "datasets": [{"label": vc.replace("_"," ").title(), "data": [float(r.get(vc,0) or 0) for r in results[:50]], "color": "#378ADD"}]}
+                except Exception as e:
+                    print(f"[chat] CHART_SPEC error: {e}")
+
+            if not insight_text:
+                insight_text = f"Here are the results for: {contextual_question[:50]}."
+
+            if any(s in insight_text.lower() for s in ["did you mean", "please specify", "multiple players", "clarify"]):
+                chart_json = None
+                q_idx = insight_text.find("?")
+                if q_idx >= 0:
+                    insight_text = insight_text[:q_idx+1].strip()
 
             full_response = f"{insight_text}\nCHART_JSON:{json.dumps(chart_json)}" if chart_json else insight_text
+            return respond(200, {"content": [{"type": "text", "text": full_response}], "sql": sql_query, "results_count": len(results)})
 
-            return respond(200, {
-                "content": [{"type": "text", "text": full_response}],
-                "sql": sql_query,
-                "results_count": len(results)
-            })
+        # GET /predictions?year=YYYY
+        if path == "/predictions" and method == "GET":
+            year = int(params.get("year", __import__("datetime").datetime.now().year))
+            cur.execute("""
+                SELECT
+                    e.event_name, e.date::text, e.id_event::text,
+                    mr.id_run::text, mr.model_version, mr.run_timestamp::text,
+                    pl.tier, pl.predicted_total, pl.dg_proj_total, pl.salary_total,
+                    pa.actual_total, pa.my_error, pa.dg_error,
+                    json_agg(
+                        json_build_object(
+                            'golfer', SPLIT_PART(p.player_name,', ',2)||' '||SPLIT_PART(p.player_name,', ',1),
+                            'dg_id', plp.dg_id, 'sim_mean', pg.sim_mean,
+                            'made_cut_pct', pg.made_cut_pct, 'salary', pg.salary
+                        ) ORDER BY pg.sim_mean DESC
+                    ) AS picks
+                FROM prediction_lineup pl
+                JOIN model_run mr ON mr.id_run = pl.id_run
+                JOIN event e ON e.id_event = mr.id_event
+                JOIN prediction_lineup_pick plp ON plp.id_lineup = pl.id_lineup
+                JOIN player p ON p.dg_id = plp.dg_id
+                JOIN prediction_golfer pg ON pg.id_run = mr.id_run AND pg.dg_id = plp.dg_id
+                LEFT JOIN prediction_accuracy pa ON pa.id_run = mr.id_run AND pa.tier = pl.tier
+                WHERE e.calendar_year = %(year)s
+                AND mr.run_timestamp = (
+                    SELECT MAX(mr2.run_timestamp) FROM model_run mr2 WHERE mr2.id_event = mr.id_event
+                )
+                GROUP BY e.event_name, e.date, e.id_event, mr.id_run, mr.model_version,
+                         mr.run_timestamp, pl.tier, pl.predicted_total, pl.dg_proj_total,
+                         pl.salary_total, pa.actual_total, pa.my_error, pa.dg_error
+                ORDER BY e.date DESC, pl.tier
+            """, {"year": year})
+            return respond(200, cur.fetchall())
 
+        # GET /prediction-golfers?id_event=UUID
+        if path == "/prediction-golfers" and method == "GET":
+            id_event = params.get("id_event")
+            if not id_event:
+                return respond(400, {"error": "id_event required"})
+            cur.execute("""
+                SELECT SPLIT_PART(p.player_name,', ',2)||' '||SPLIT_PART(p.player_name,', ',1) AS golfer,
+                    pg.dg_id, pg.salary, pg.sim_mean, pg.sim_sd, pg.sim_p_low, pg.sim_p_high,
+                    pg.made_cut_pct, pg.dg_proj, pg.dg_std_dev
+                FROM prediction_golfer pg
+                JOIN player p ON p.dg_id = pg.dg_id
+                WHERE pg.id_run = (
+                    SELECT id_run FROM model_run WHERE id_event = %(id_event)s ORDER BY run_timestamp DESC LIMIT 1
+                )
+                ORDER BY pg.sim_mean DESC
+            """, {"id_event": id_event})
+            return respond(200, cur.fetchall())
         # GET /upcoming-event
         if path == "/upcoming-event" and method == "GET":
             secret_name = os.environ.get("SECRET_NAME")

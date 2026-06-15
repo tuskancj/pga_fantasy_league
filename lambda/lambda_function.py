@@ -131,11 +131,17 @@ def sync_players(cfg: dict, api_key: str) -> None:
 
 
 def get_missing_events(cfg: dict, api_key: str, current_year: int) -> pd.DataFrame:
-    """Return events that exist in DataGolf but not in the AWS DB (current year, PGA only)."""
+    """Return events that have DataGolf data but missing dfs_total in AWS DB."""
     print("[get_missing_events] Checking for missing events...")
     events_dg = dg_get("historical-raw-data/event-list", {"key": api_key})
-    events_aws = read_sql(
-        f"SELECT event_id FROM event WHERE calendar_year = {current_year};", cfg
+
+    # Events already fully synced = those that have dfs_total rows
+    events_synced = read_sql(
+        f"""SELECT DISTINCT e.event_id
+            FROM event e
+            JOIN dfs_total dt ON dt.id_event = e.id_event
+            WHERE e.calendar_year = {current_year};""",
+        cfg,
     )
 
     events_dg_year = events_dg[
@@ -143,8 +149,8 @@ def get_missing_events(cfg: dict, api_key: str, current_year: int) -> pd.DataFra
         & (events_dg["calendar_year"] == events_dg["calendar_year"].max())
     ]
 
-    missing = events_dg_year[~events_dg_year["event_id"].isin(events_aws["event_id"])]
-    print(f"[get_missing_events] Found {len(missing)} missing event(s).")
+    missing = events_dg_year[~events_dg_year["event_id"].isin(events_synced["event_id"])]
+    print(f"[get_missing_events] Found {len(missing)} event(s) needing sync.")
     return missing
 
 
@@ -168,6 +174,7 @@ def filter_events_with_dfs(
 
 
 def sync_events(missing_events: pd.DataFrame, cfg: dict) -> None:
+    """Upsert events by (calendar_year, event_id) — safe whether prediction notebook ran first or not."""
     if missing_events.empty:
         return
     to_insert = (
@@ -176,7 +183,26 @@ def sync_events(missing_events: pd.DataFrame, cfg: dict) -> None:
         .drop(["sg_categories", "tour", "traditional_stats"], axis=1)
     )
     to_insert["dfs_payout"] = None
-    insert_df("event", to_insert, cfg)
+
+    conn = get_connection(cfg)
+    try:
+        cursor = conn.cursor()
+        for _, row in to_insert.iterrows():
+            cursor.execute("""
+                INSERT INTO event (calendar_year, event_id, event_name, date, dfs_payout)
+                VALUES (%(calendar_year)s, %(event_id)s, %(event_name)s, %(date)s, %(dfs_payout)s)
+                ON CONFLICT (calendar_year, event_id) DO UPDATE
+                    SET event_name  = EXCLUDED.event_name,
+                        date        = EXCLUDED.date
+            """, row.to_dict())
+        conn.commit()
+        print(f"[sync_events] Upserted {len(to_insert)} event(s).")
+    except psycopg2.Error as e:
+        conn.rollback()
+        raise RuntimeError(f"sync_events failed: {e.pgerror}") from e
+    finally:
+        cursor.close()
+        conn.close()
 
 
 def sync_rounds(
