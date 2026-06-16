@@ -642,18 +642,162 @@ Never mention SQL, markdown, or chart types in text."""
             if not id_event:
                 return respond(400, {"error": "id_event required"})
             cur.execute("""
-                SELECT SPLIT_PART(p.player_name,', ',2)||' '||SPLIT_PART(p.player_name,', ',1) AS golfer,
+                SELECT
+                    SPLIT_PART(p.player_name,', ',2)||' '||SPLIT_PART(p.player_name,', ',1) AS golfer,
                     pg.dg_id, pg.salary, pg.sim_mean, pg.sim_sd, pg.sim_p_low, pg.sim_p_high,
-                    pg.made_cut_pct, pg.dg_proj, pg.dg_std_dev
+                    pg.made_cut_pct, pg.dg_proj, pg.dg_std_dev,
+                    dt.total_pts AS actual_pts,
+                    dt.fin_text
                 FROM prediction_golfer pg
                 JOIN player p ON p.dg_id = pg.dg_id
+                LEFT JOIN dfs_total dt ON dt.dg_id = pg.dg_id AND dt.id_event = %(id_event)s
                 WHERE pg.id_run = (
                     SELECT id_run FROM model_run WHERE id_event = %(id_event)s ORDER BY run_timestamp DESC LIMIT 1
                 )
                 ORDER BY pg.sim_mean DESC
             """, {"id_event": id_event})
             return respond(200, cur.fetchall())
-        # GET /upcoming-event
+
+        # GET /prediction-distributions?id_event=UUID&dg_ids=1,2,3
+        # Returns dist_samples for specified golfers (lineup picks on load, individual on demand)
+        if path == "/prediction-distributions" and method == "GET":
+            id_event = params.get("id_event")
+            dg_ids_param = params.get("dg_ids", "")
+            if not id_event:
+                return respond(400, {"error": "id_event required"})
+
+            # Parse dg_ids - if not provided, return all lineup picks (up to 18)
+            if dg_ids_param:
+                dg_ids = [int(x) for x in dg_ids_param.split(",") if x.strip().isdigit()]
+            else:
+                # Default: all golfers in any lineup for this event
+                cur.execute("""
+                    SELECT DISTINCT plp.dg_id
+                    FROM prediction_lineup_pick plp
+                    JOIN prediction_lineup pl ON pl.id_lineup = plp.id_lineup
+                    WHERE pl.id_run = (
+                        SELECT id_run FROM model_run WHERE id_event = %(id_event)s ORDER BY run_timestamp DESC LIMIT 1
+                    )
+                """, {"id_event": id_event})
+                dg_ids = [r['dg_id'] for r in cur.fetchall()]
+
+            if not dg_ids:
+                return respond(200, [])
+
+            cur.execute("""
+                SELECT SPLIT_PART(p.player_name,', ',2)||' '||SPLIT_PART(p.player_name,', ',1) AS golfer,
+                    pg.dg_id, pg.sim_mean, pg.sim_sd, pg.sim_p_low, pg.sim_p_high,
+                    pg.made_cut_pct, pg.dist_samples
+                FROM prediction_golfer pg
+                JOIN player p ON p.dg_id = pg.dg_id
+                WHERE pg.id_run = (
+                    SELECT id_run FROM model_run WHERE id_event = %(id_event)s ORDER BY run_timestamp DESC LIMIT 1
+                )
+                AND pg.dg_id = ANY(%(dg_ids)s)
+                ORDER BY pg.sim_mean DESC
+            """, {"id_event": id_event, "dg_ids": dg_ids})
+            return respond(200, cur.fetchall())
+        # GET /prediction-golfer-accuracy?year=YYYY&dg_id=INT
+        if path == "/prediction-golfer-accuracy" and method == "GET":
+            year = int(params.get("year", __import__("datetime").datetime.now().year))
+            dg_id = params.get("dg_id")
+
+            if dg_id:
+                # Single golfer per-event history
+                cur.execute("""
+                    SELECT
+                        SPLIT_PART(p.player_name,', ',2)||' '||SPLIT_PART(p.player_name,', ',1) AS golfer,
+                        pg.dg_id,
+                        e.event_name,
+                        e.date::text,
+                        pg.sim_mean,
+                        pg.dg_proj,
+                        dt.total_pts AS actual_pts,
+                        dt.total_pts - pg.sim_mean AS my_error,
+                        dt.total_pts - pg.dg_proj AS dg_error,
+                        dt.fin_text
+                    FROM prediction_golfer pg
+                    JOIN model_run mr ON mr.id_run = pg.id_run
+                    JOIN event e ON e.id_event = mr.id_event
+                    JOIN player p ON p.dg_id = pg.dg_id
+                    JOIN dfs_total dt ON dt.dg_id = pg.dg_id AND dt.id_event = mr.id_event
+                    WHERE e.calendar_year = %(year)s
+                    AND pg.dg_id = %(dg_id)s
+                    AND mr.run_timestamp = (
+                        SELECT MAX(mr2.run_timestamp) FROM model_run mr2 WHERE mr2.id_event = mr.id_event
+                    )
+                    ORDER BY e.date ASC
+                """, {"year": year, "dg_id": int(dg_id)})
+                return respond(200, cur.fetchall())
+            else:
+                # Aggregated per-golfer accuracy across all completed events
+                cur.execute("""
+                    WITH golfer_accuracy AS (
+                        SELECT
+                            SPLIT_PART(p.player_name,', ',2)||' '||SPLIT_PART(p.player_name,', ',1) AS golfer,
+                            pg.dg_id,
+                            COUNT(*) AS events_predicted,
+                            ROUND(AVG(ABS(dt.total_pts - pg.sim_mean))::numeric, 2) AS my_mae,
+                            ROUND(AVG(ABS(dt.total_pts - pg.dg_proj))::numeric, 2) AS dg_mae,
+                            ROUND(AVG(dt.total_pts - pg.sim_mean)::numeric, 2) AS avg_error,
+                            ROUND(SQRT(AVG(POWER(dt.total_pts - pg.sim_mean, 2)))::numeric, 2) AS my_rmse,
+                            ROUND(SQRT(AVG(POWER(dt.total_pts - pg.dg_proj, 2)))::numeric, 2) AS dg_rmse,
+                            ROUND(MIN(ABS(dt.total_pts - pg.sim_mean))::numeric, 2) AS best_error,
+                            ROUND(MAX(ABS(dt.total_pts - pg.sim_mean))::numeric, 2) AS worst_error
+                        FROM prediction_golfer pg
+                        JOIN model_run mr ON mr.id_run = pg.id_run
+                        JOIN event e ON e.id_event = mr.id_event
+                        JOIN player p ON p.dg_id = pg.dg_id
+                        JOIN dfs_total dt ON dt.dg_id = pg.dg_id AND dt.id_event = mr.id_event
+                        WHERE e.calendar_year = %(year)s
+                        AND mr.run_timestamp = (
+                            SELECT MAX(mr2.run_timestamp) FROM model_run mr2 WHERE mr2.id_event = mr.id_event
+                        )
+                        GROUP BY p.player_name, pg.dg_id
+                        HAVING COUNT(*) >= 1
+                    )
+                    SELECT * FROM golfer_accuracy
+                    ORDER BY my_mae ASC
+                """, {"year": year})
+                rows = cur.fetchall()
+
+                # Return top 10 best, top 10 worst, full list for search
+                all_rows = rows
+                best10 = rows[:10]
+                worst10 = sorted(rows, key=lambda r: r['my_mae'] if r['my_mae'] else 0, reverse=True)[:10]
+
+                return respond(200, {
+                    "best": best10,
+                    "worst": worst10,
+                    "all": all_rows
+                })
+        if path == "/prediction-history" and method == "GET":
+            year = int(params.get("year", __import__("datetime").datetime.now().year))
+            cur.execute("""
+                SELECT
+                    e.event_name,
+                    e.date::text,
+                    e.id_event::text,
+                    mr.model_version,
+                    pl.tier,
+                    pl.predicted_total,
+                    pl.dg_proj_total,
+                    pl.salary_total,
+                    pa.actual_total,
+                    pa.my_error,
+                    pa.dg_error
+                FROM prediction_lineup pl
+                JOIN model_run mr ON mr.id_run = pl.id_run
+                JOIN event e ON e.id_event = mr.id_event
+                LEFT JOIN prediction_accuracy pa ON pa.id_run = mr.id_run AND pa.tier = pl.tier
+                WHERE e.calendar_year = %(year)s
+                AND pa.actual_total IS NOT NULL
+                AND mr.run_timestamp = (
+                    SELECT MAX(mr2.run_timestamp) FROM model_run mr2 WHERE mr2.id_event = mr.id_event
+                )
+                ORDER BY e.date ASC, pl.tier
+            """, {"year": year})
+            return respond(200, cur.fetchall())
         if path == "/upcoming-event" and method == "GET":
             secret_name = os.environ.get("SECRET_NAME")
             secrets = get_secret(secret_name)
